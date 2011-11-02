@@ -107,6 +107,7 @@ struct spdy_reply {
 };
 
 typedef void (*spdy_fn)(void*);
+typedef void (*spdy_send_wait_fn)(void*, int enable);
 typedef void (*spdy_data_fn)(void*, int sts, spdy_string, int compressed);
 typedef void (*spdy_request_fn)(void*, spdy_stream*, spdy_request*);
 typedef void (*spdy_reply_fn)(void*, spdy_reply*);
@@ -132,7 +133,7 @@ void spdyC_free(spdy_connection* c);
 
 int spdyC_send_ready(spdy_connection* c);
 int spdyC_recv_ready(spdy_connection* c);
-void spdyC_on_send_wait(spdy_connection* c, spdy_fn cb, void* user);
+void spdyC_on_send_wait(spdy_connection* c, spdy_send_wait_fn cb, void* user);
 
 int spdyC_start(spdy_connection* c, spdy_stream* s, spdy_request* r);
 void spdyC_on_request(spdy_connection* c, spdy_request_fn cb, void* user);
@@ -141,17 +142,19 @@ spdy_connection* spdyC_connect(const char* host, SSL_CTX* ctx, int* fd);
 spdy_connection* spdyC_accept(int sfd, SSL_CTX* ctx, int* fd);
 
 spdy_headers* spdyH_new(void);
+void spdyH_reset(spdy_headers* h);
 void spdyH_free(spdy_headers* h);
 
-/* will return the first header for that key */
+/* Note spdy_headers does _not_ clone the actual string contents. Repeats of
+ * the same key should be set a single null separated value.
+ */
 spdy_string spdyH_get(spdy_headers* h, const char* key);
-
 void spdyH_del(spdy_headers* h, const char* key);
-void spdyH_add(spdy_headers* h, const char* key, spdy_string val);
 void spdyH_set(spdy_headers* h, const char* key, spdy_string val);
 
-/* Will return all the headers for each key as a null seperated string.  The
- * initial value of idx must be -1. */
+/* Will return all the headers for each key as a null separated string. The
+ * initial value of idx must be -1.
+ */
 int spdyH_next(spdy_headers* h, int* idx, const char** key, spdy_string* val);
 
 

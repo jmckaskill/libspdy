@@ -1,5 +1,10 @@
 /* vim: set noet sts=8 ts=8 sw=8 tw=78: */
 #define SPDY_USE_DMEM
+
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
+
 #include "packets.h"
 #include <dmem/zlib.h>
 #include <assert.h>
@@ -11,105 +16,64 @@
 
 #define PRIORITY_SHIFT          5
 
+const char DICTIONARY[] =
+        "optionsgetheadpostputdeletetraceacceptaccept-charsetaccept-encodingac"
+	"cept-languageauthorizationexpectfromhostif-modified-sinceif-matchif-n"
+	"one-matchif-rangeif-unmodifiedsincemax-forwardsproxy-authorizationran"
+	"gerefererteuser-agent100101200201202203204205206300301302303304305306"
+	"307400401402403404405406407408409410411412413414415416417500501502503"
+	"504505accept-rangesageetaglocationproxy-authenticatepublicretry-after"
+	"servervarywarningwww-authenticateallowcontent-basecontent-encodingcac"
+	"he-controlconnectiondatetrailertransfer-encodingupgradeviawarningcont"
+	"ent-languagecontent-lengthcontent-locationcontent-md5content-rangecon"
+	"tent-typeetagexpireslast-modifiedset-cookieMondayTuesdayWednesdayThur"
+	"sdayFridaySaturdaySundayJanFebMarAprMayJunJulAugSepOctNovDecchunkedte"
+	"xt/htmlimage/pngimage/jpgimage/gifapplication/xmlapplication/xhtmltex"
+	"t/plainpublicmax-agecharset=iso-8859-1utf-8gzipdeflateHTTP/1.1statusv"
+	"ersionurl";
+
+/* Note keys from the decompress buffer are actually null terminated by sheer
+ * coincidence. Because they are followed by either the value length, which is
+ * big endian and are not allowed to be greater than 2^24.
+ */
+
 spdy_headers* spdyH_new(void) {
-	return (spdy_headers*) calloc(1, sizeof(spdy_headers));
+	spdy_headers* h = (spdy_headers*) calloc(1, sizeof(spdy_headers));
+	return h;
+}
+
+void spdyH_reset(spdy_headers* h) {
+	dh_clear(&h->h);
 }
 
 void spdyH_free(spdy_headers* h) {
 	if (h) {
 		dh_free(&h->h);
-		dv_free(h->v);
+		free(h);
 	}
-}
-
-static int next_header(spdy_headers* h, int* idx, d_Slice(char)* key, d_Slice(char)* val) {
-	if (!dh_hasnext(&h->h, idx)) {
-		return 0;
-	}
-
-	key->data = (uintptr_t) h->h.keys[*idx].data + h->v.data;
-	key->size = h->h.vals[*idx].size;
-	val->data = (uintptr_t) h->h.vals[*idx].data + h->v.data;
-	val->size = h->h.vals[*idx].size;
-
-	return 1;
 }
 
 int spdyH_next(spdy_headers* h, int* idx, const char** key, spdy_string* val) {
-	d_Slice(char) ks;
-	if (!next_header(h, idx, &ks, val)) {
+	if (!dh_hasnext(&h->h, idx)) {
 		return 0;
 	}
-	*key = ks.data;
+	*key = h->h.keys[*idx].data;
+	*val = h->h.vals[*idx];
 	return 1;
 }
 
 spdy_string spdyH_get(spdy_headers* h, const char* key) {
 	d_Slice(char) ret = DV_INIT;
-	if (!dhs_get(&h->h, dv_char(key), &ret)) {
-		return ret;
-	}
-
-	ret.data += (uintptr_t) h->v.data;
-	return dv_split_left(&ret, '\0');
+	dhs_get(&h->h, dv_char(key), &ret);
+	return ret;
 }
 
 void spdyH_del(spdy_headers* h, const char* key) {
 	dhs_remove(&h->h, dv_char(key));
 }
 
-void spdyH_add(spdy_headers* h, const char* key, spdy_string val) {
-	int vi;
-	d_Slice(char) hdr;
-
-	if (dhs_add(&h->h, dv_char(key), &vi)) {
-		dv_append(&h->v, val);
-		dv_append1(&h->v, '\0');
-		h->h.vals[vi].data = (void*) (uintptr_t) (h->v.size - val.size);
-		h->h.vals[vi].size = val.size;
-		return;
-	}
-
-	// Append to an already added header
-	hdr = h->h.vals[vi];
-
-	// We need to copy the existing header to the end if its not already
-	// at the end
-	if ((uintptr_t) hdr.data + hdr.size != h->v.size + 1) {
-		dv_append(&h->v, hdr);
-		h->h.vals[vi].data = (void*) (uintptr_t) (h->v.size - hdr.size);
-	}
-
-	dv_append(&h->v, val);
-	h->h.vals[vi].size += val.size + 1;
-	return;
-}
-
-/* returns 1 if the header was added */
-static int add_full_header(spdy_headers* h, d_Slice(char) key, d_Slice(char) val) {
-	int vi;
-	int ret = 1;
-
-	if (!dhs_add(&h->h, key, &vi)) {
-		d_Slice(char) hdr = h->h.vals[vi];
-
-		// The existing header is at the end of the buffer
-		if ((uintptr_t) hdr.data + hdr.size == h->v.size + 1) {
-			dv_erase_end(&h->v, hdr.size + 1);
-		}
-
-		ret = 0;
-	}
-
-	dv_append(&h->v, val);
-	dv_append1(&h->v, '\0');
-	h->h.vals[vi].data = (void*) (uintptr_t) (h->v.size - val.size);
-	h->h.vals[vi].size = val.size;
-	return ret;
-}
-
 void spdyH_set(spdy_headers* h, const char* key, spdy_string val) {
-	add_full_header(h, dv_char(key), val);
+	dhs_set(&h->h, dv_char(key), val);
 }
 
 
@@ -154,13 +118,16 @@ void marshal_data_header(char* out, struct data* s) {
 }
 
 void parse_data(struct data* s, d_Slice(char) d) {
-	assert(d.size >= DATA_HEADER_SIZE);
 	struct data_hdr* h = (struct data_hdr*) d.data;
+	uint32_t flags;
+
+	assert(d.size >= DATA_HEADER_SIZE);
 	s->stream = (int) r32(h->stream);
 
-	uint32_t flags = r32(h->flags);
+	flags = r32(h->flags);
 	s->finished = (flags & FLAG_FINISHED) != 0;
 	s->compressed = (flags & FLAG_COMPRESSED) != 0;
+	s->size = (int) (flags & FLAG_LENGTH);
 }
 
 static void deflate_v3(d_Vector(char)* out, z_stream* z, d_Slice(char) key, d_Slice(char) val) {
@@ -176,8 +143,8 @@ static void deflate_v3(d_Vector(char)* out, z_stream* z, d_Slice(char) key, d_Sl
 #endif
 
 	dz_deflate(out, z, dv_char2((char*) &klen, 4), Z_NO_FLUSH);
-	dz_deflate(out, z, dv_char2((char*) &vlen, 4), Z_NO_FLUSH);
 	dz_deflate(out, z, key, Z_NO_FLUSH);
+	dz_deflate(out, z, dv_char2((char*) &vlen, 4), Z_NO_FLUSH);
 	dz_deflate(out, z, val, Z_NO_FLUSH);
 }
 
@@ -187,9 +154,8 @@ static void begin_deflate_v3(d_Vector(char)* out, z_stream* z, spdy_headers* hdr
 
 	if (hdrs) {
 		int idx = -1;
-		d_Slice(char) key, val;
-		while (next_header(hdrs, &idx, &key, &val)) {
-			deflate_v3(out, z, key, val);
+		while (dh_hasnext(&hdrs->h, &idx)) {
+			deflate_v3(out, z, hdrs->h.keys[idx], hdrs->h.vals[idx]);
 		}
 	}
 }
@@ -206,10 +172,9 @@ struct extra_headers {
 static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, d_Slice(char) d, d_Vector(char)* buf) {
 	int i, err, vals;
 
-	dv_clear(&hdrs->v);
 	dh_clear(&hdrs->h);
 
-	err = dz_inflate(buf, z, d);
+	err = dz_inflate(buf, z, d, dv_char(DICTIONARY));
 	if (err) return err;
 
 	d = *buf;
@@ -266,7 +231,7 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 			continue;
 		}
 
-		if (key.data[j] == ':') {
+		if (key.data[0] == ':') {
 			if (dv_equals(key, C(":status"))) {
 				e->status = val;
 			} else if (dv_equals(key, C(":version"))) {
@@ -284,9 +249,12 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 			// understand
 		} else {
 			// Headers must be unique
-			if (!add_full_header(hdrs, key, val)) {
+			int vi;
+			if (!dhs_add(&hdrs->h, key, &vi)) {
 				return SPDY_PROTOCOL;
 			}
+
+			hdrs->h.vals[vi] = val;
 		}
 	}
 
@@ -302,7 +270,10 @@ struct syn_stream_hdr {
 };
 
 void marshal_syn_stream(d_Vector(char)* out, struct syn_stream* s, z_stream* z) {
+	struct syn_stream_hdr* h;
+	uint32_t flags;
 	int begin = out->size;
+
 	dv_append_buffer(out, sizeof(struct syn_stream_hdr));
 
 	if (s->path.size == 0) {
@@ -317,9 +288,9 @@ void marshal_syn_stream(d_Vector(char)* out, struct syn_stream* s, z_stream* z) 
 	deflate_v3(out, z, C(":scheme"), s->scheme);
 	dz_deflate(out, z, C(""), Z_SYNC_FLUSH);
 
-	struct syn_stream_hdr* h = (struct syn_stream_hdr*) &out->data[begin];
+	h = (struct syn_stream_hdr*) &out->data[begin];
 
-	uint32_t flags = (out->size - begin) |
+	flags = (out->size - begin - FRAME_HEADER_SIZE) |
 	       	(s->finished ? FLAG_FINISHED : 0) |
 	       	(s->unidirectional ? FLAG_UNIDIRECTIONAL : 0);
 
@@ -332,12 +303,16 @@ void marshal_syn_stream(d_Vector(char)* out, struct syn_stream* s, z_stream* z) 
 }
 
 int parse_syn_stream(struct syn_stream* s, d_Slice(char) d, z_stream* z, d_Vector(char)* buf) {
+	struct syn_stream_hdr* h = (struct syn_stream_hdr*) d.data;
+	struct extra_headers e;
+	uint32_t flags;
+	int err;
+
 	if (d.size < sizeof(struct syn_stream_hdr)) {
 		return SPDY_PROTOCOL;
 	}
 
-	struct syn_stream_hdr* h = (struct syn_stream_hdr*) d.data;
-	uint32_t flags = r32(h->flags);
+	flags = r32(h->flags);
 
 	s->finished = (flags & FLAG_FINISHED) != 0;
 	s->unidirectional = (flags & FLAG_UNIDIRECTIONAL) != 0;
@@ -349,10 +324,9 @@ int parse_syn_stream(struct syn_stream* s, d_Slice(char) d, z_stream* z, d_Vecto
 		return SPDY_PROTOCOL;
 	}
 
-	struct extra_headers e;
 	memset(&e, 0, sizeof(e));
 
-	int err = inflate_v3(s->headers, &e, z, dv_right(d, sizeof(struct syn_stream_hdr)), buf);
+	err = inflate_v3(s->headers, &e, z, dv_right(d, sizeof(struct syn_stream_hdr)), buf);
 	if (err) return err;
 
 	if (!e.version.size || !e.method.size || !e.scheme.size || !e.host.size || !e.path.size) {
@@ -375,6 +349,8 @@ struct syn_reply_hdr {
 
 void marshal_syn_reply(d_Vector(char)* out, struct syn_reply* s, z_stream* z) {
 	int begin = out->size;
+	struct syn_reply_hdr* h;
+
 	dv_append_buffer(out, sizeof(struct syn_reply_hdr));
 
 	begin_deflate_v3(out, z, s->headers, 2);
@@ -382,27 +358,28 @@ void marshal_syn_reply(d_Vector(char)* out, struct syn_reply* s, z_stream* z) {
 	deflate_v3(out, z, C(":version"), s->protocol);
 	dz_deflate(out, z, C(""), Z_SYNC_FLUSH);
 
-	struct syn_reply_hdr* h = (struct syn_reply_hdr*) &out->data[begin];
+	h = (struct syn_reply_hdr*) &out->data[begin];
 
 	w32(h->type, SYN_REPLY);
-	w32(h->flags, (out->size - begin) | (s->finished ? FLAG_FINISHED : 0));
+	w32(h->flags, (out->size - begin - FRAME_HEADER_SIZE) | (s->finished ? FLAG_FINISHED : 0));
 	w32(h->stream, s->stream);
 }
 
 int parse_syn_reply(struct syn_reply* s, d_Slice(char) d, z_stream* z, d_Vector(char)* buf) {
+	struct syn_reply_hdr* h = (struct syn_reply_hdr*) d.data;
+	struct extra_headers e;
+	int err;
+
 	if (d.size < sizeof(struct syn_reply_hdr)) {
 		return SPDY_PROTOCOL;
 	}
 
-	struct syn_reply_hdr* h = (struct syn_reply_hdr*) d.data;
-
 	s->finished = (r32(h->flags) & FLAG_FINISHED) != 0;
 	s->stream = (int) r32(h->stream);
 
-	struct extra_headers e;
 	memset(&e, 0, sizeof(e));
 
-	int err = inflate_v3(s->headers, &e, z, dv_right(d, sizeof(struct syn_reply_hdr)), buf);
+	err = inflate_v3(s->headers, &e, z, dv_right(d, sizeof(struct syn_reply_hdr)), buf);
 	if (err) return err;
 
 	if (!e.status.size || !e.version.size) {
@@ -425,17 +402,17 @@ void marshal_rst_stream(d_Vector(char)* out, int stream, int error) {
 	struct rst_stream_hdr* h = (struct rst_stream_hdr*) dv_append_buffer(out, sizeof(struct rst_stream_hdr));
 
 	w32(h->type, RST_STREAM);
-	w32(h->flags, sizeof(struct rst_stream_hdr));
+	w32(h->flags, sizeof(struct rst_stream_hdr) - FRAME_HEADER_SIZE);
 	w32(h->stream, stream);
 	w32(h->error, -error);
 }
 
 int parse_rst_stream(int* stream, int* error, d_Slice(char) d) {
+	struct rst_stream_hdr* h = (struct rst_stream_hdr*) d.data;
+
 	if (d.size < sizeof(struct rst_stream_hdr)) {
 		return SPDY_PROTOCOL;
 	}
-
-	struct rst_stream_hdr* h = (struct rst_stream_hdr*) d.data;
 
 	*stream = (int) r32(h->stream);
 	*error = -(int) r32(h->error);
@@ -461,7 +438,7 @@ void marshal_ping(d_Vector(char)* out, uint32_t id) {
 	struct ping_hdr* h = (struct ping_hdr*) dv_append_buffer(out, sizeof(struct ping_hdr));
 
 	w32(h->type, PING);
-	w32(h->flags, sizeof(struct ping_hdr));
+	w32(h->flags, sizeof(struct ping_hdr) - FRAME_HEADER_SIZE);
 	w32(h->id, id);
 }
 
@@ -493,17 +470,17 @@ void marshal_window(d_Vector(char)* out, int stream, int delta) {
 	struct window_hdr* h = (struct window_hdr*) dv_append_buffer(out, sizeof(struct window_hdr));
 
 	w32(h->type, WINDOW_UPDATE);
-	w32(h->flags, sizeof(struct window_hdr));
+	w32(h->flags, sizeof(struct window_hdr) - FRAME_HEADER_SIZE);
 	w32(h->stream, stream);
 	w32(h->window_delta, delta);
 }
 
 int parse_window(int* stream, int* delta, d_Slice(char) d) {
+	struct window_hdr* h = (struct window_hdr*) d.data;
+
 	if (d.size < sizeof(struct window_hdr)) {
 		return SPDY_PROTOCOL;
 	}
-
-	struct window_hdr* h = (struct window_hdr*) d.data;
 
 	*stream = (int) r32(h->stream);
 	*delta = (int) r32(h->window_delta);

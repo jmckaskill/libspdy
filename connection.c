@@ -1,12 +1,19 @@
 /* vim: set noet sts=8 ts=8 sw=8 tw=78: */
 
+
+#ifdef _WIN32
+#include <WinSock2.h>
+#else
+#include <sys/socket.h>
+#endif
+
 #define SPDY_USE_DMEM
 #include <spdy.h>
 #include "packets.h"
 #include <dmem/hash.h>
 #include <openssl/ssl.h>
+#include <openssl/err.h>
 #include <zlib.h>
-#include <sys/socket.h>
 #include <assert.h>
 
 #ifdef _MSC_VER
@@ -16,22 +23,6 @@
 #define ref(p) __sync_add_and_fetch(p, 1)
 #define deref(p) __sync_add_and_fetch(p, 1)
 #endif
-
-static const char DICTIONARY[] =
-        "optionsgetheadpostputdeletetraceacceptaccept-charsetaccept-encodingac"
-	"cept-languageauthorizationexpectfromhostif-modified-sinceif-matchif-n"
-	"one-matchif-rangeif-unmodifiedsincemax-forwardsproxy-authorizationran"
-	"gerefererteuser-agent100101200201202203204205206300301302303304305306"
-	"307400401402403404405406407408409410411412413414415416417500501502503"
-	"504505accept-rangesageetaglocationproxy-authenticatepublicretry-after"
-	"servervarywarningwww-authenticateallowcontent-basecontent-encodingcac"
-	"he-controlconnectiondatetrailertransfer-encodingupgradeviawarningcont"
-	"ent-languagecontent-lengthcontent-locationcontent-md5content-rangecon"
-	"tent-typeetagexpireslast-modifiedset-cookieMondayTuesdayWednesdayThur"
-	"sdayFridaySaturdaySundayJanFebMarAprMayJunJulAugSepOctNovDecchunkedte"
-	"xt/htmlimage/pngimage/jpgimage/gifapplication/xmlapplication/xhtmltex"
-	"t/plainpublicmax-agecharset=iso-8859-1utf-8gzipdeflateHTTP/1.1statusv"
-	"ersionurl";
 
 #define DEFAULT_PROTOCOL C("HTTP/1.1")
 #define STATUS_OK C("200 OK")
@@ -83,9 +74,6 @@ struct spdy_stream {
 	void* send_ready_user;
 };
 
-#define WAIT_RECV 1
-#define WAIT_SEND 2
-
 struct spdy_connection {
 	d_Vector(char) tbuf;
 	d_Vector(char) rbuf;
@@ -107,8 +95,11 @@ struct spdy_connection {
 
 	bool go_away;
 	bool flushing;
-	int tx_wait;
-	int rx_wait;
+
+	int write_after_read;
+	int read_after_write;
+
+	int waiting_for_write;
 
 	int default_rx_window;
 	int default_tx_window;
@@ -117,7 +108,7 @@ struct spdy_connection {
 	d_Vector(stream) pstreams[NUM_PRIORITIES];
 	spdy_stream* immediate_stream;
 
-	spdy_fn send_wait;
+	spdy_send_wait_fn send_wait;
 	void* send_wait_user;
 
 	spdy_request_fn request;
@@ -130,6 +121,15 @@ static void Log(spdy_connection* c, const char* format, ...) {
 	va_list ap;
 	va_start(ap, format);
 	vfprintf(stderr, format, ap);
+}
+
+static void log_headers(spdy_connection* c, spdy_headers* h) {
+	const char* key;
+	d_Slice(char) val;
+	int i = -1;
+	while (h && spdyH_next(h, &i, &key, &val)) {
+		Log(c, "\t%s: %.*s\n", key, DV_PRI(val));
+	}
 }
 
 static void log_syn_stream(spdy_connection* c, const char* dir, struct syn_stream* f) {
@@ -145,6 +145,8 @@ static void log_syn_stream(spdy_connection* c, const char* dir, struct syn_strea
 			DV_PRI(f->scheme),
 			DV_PRI(f->host),
 			DV_PRI(f->path));
+
+	log_headers(c, f->headers);
 }
 
 static void log_syn_reply(spdy_connection* c, const char* dir, struct syn_reply* f) {
@@ -154,6 +156,8 @@ static void log_syn_reply(spdy_connection* c, const char* dir, struct syn_reply*
 			f->finished,
 			DV_PRI(f->protocol),
 			DV_PRI(f->status));
+
+	log_headers(c, f->headers);
 }
 
 static void log_data(spdy_connection* c, const char* dir, struct data* f) {
@@ -194,14 +198,19 @@ static void log_rst_stream(spdy_connection* c, const char* dir, int stream, int 
 	Log(c, "spdy %s RST_STREAM %d, %d %s", dir, stream, reason, reason_string(reason));
 }
 
+static int log_ssl_error(const char* str, size_t len, void* u) {
+	spdy_connection* c = (spdy_connection*) u;
+	Log(c, "ssl: %.*s\n", len, str);
+	return len;
+}
+
 spdy_connection* spdyC_new(BIO* io, int io_close) {
 	spdy_connection* c = (spdy_connection*) calloc(1, sizeof(spdy_connection));
 
 	deflateInit(&c->zout, Z_BEST_COMPRESSION);
-	deflateSetDictionary(&c->zout, (uint8_t*) DICTIONARY, sizeof(DICTIONARY) - 1);
+	deflateSetDictionary(&c->zout, (uint8_t*) DICTIONARY, strlen(DICTIONARY));
 
 	inflateInit(&c->zin);
-	inflateSetDictionary(&c->zin, (uint8_t*) DICTIONARY, sizeof(DICTIONARY) - 1);
 
 	c->io = io;
 	c->io_close = io_close != 0;
@@ -214,7 +223,6 @@ spdy_connection* spdyC_new(BIO* io, int io_close) {
 	c->default_rx_window = DEFAULT_WINDOW;
 	c->default_tx_window = DEFAULT_WINDOW;
 
-	c->rx_wait = WAIT_RECV;
 	c->headers = spdyH_new();
 
 	return c;
@@ -257,6 +265,12 @@ static void finish_stream(spdy_connection* c, spdy_stream* s, int si, int err) {
 	}
 
 	s->tx = FINISHED;
+
+	if (s->rx != FINISHED && s->recv) {
+		d_Slice(char) end = DV_INIT;
+		s->recv(s->recv_user, err, end, s->rx_compressed);
+	}
+
 	s->rx = FINISHED;
 
 	assert(si >= 0);
@@ -329,37 +343,44 @@ void spdyC_free(spdy_connection* c) {
 	free(c);
 }
 
+static int flush_recv(spdy_connection* c);
+
 static int flush_tbuf(spdy_connection* c) {
 	int sent;
-	if (c->send_wait) {
-		return 0;
-	}
 
+	c->write_after_read = 0;
 	sent = BIO_write(c->io, c->tbuf.data, c->tbuf.size);
 
 	// Remove any data that was sent from the buffer
-	if (sent >= 0) {
+	if (sent > 0) {
 		dv_erase(&c->tbuf, 0, sent);
 	}
 
 	// Check to see why we couldn't send all of the data
-	if (sent != c->tbuf.size) {
+	if (c->tbuf.size) {
 		if (!BIO_should_retry(c->io)) {
+			ERR_print_errors_cb(&log_ssl_error, c);
 			return -1;
 		}
 
-		if (BIO_should_read(c->io)) {
-			c->tx_wait |= WAIT_RECV;
-		}
+		c->write_after_read = BIO_should_read(c->io);
 
-		if (BIO_should_write(c->io) && (c->tx_wait & WAIT_SEND) == 0) {
-			c->tx_wait |= WAIT_SEND;
+		if (c->waiting_for_write != BIO_should_write(c->io)) {
+			c->waiting_for_write = !c->waiting_for_write;
 			if (c->send_wait) {
-				c->send_wait(c->send_wait_user);
+				c->send_wait(c->send_wait_user, c->waiting_for_write);
 			}
 		}
 
-		return 0;
+	} else if (c->waiting_for_write) {
+		c->waiting_for_write = 0;
+		if (c->send_wait) {
+			c->send_wait(c->send_wait_user, 0);
+		}
+	}
+
+	if (c->read_after_write) {
+		return flush_recv(c);
 	}
 
 	return 0;
@@ -388,11 +409,12 @@ static int start(spdy_connection* c, spdy_stream* p, spdy_stream* s, spdy_reques
 	f.finished = r->finished;
 	f.unidirectional = r->unidirectional;
 	f.associated_stream = p ? p->id : 0;
-	f.priority = r->priority - DEFAULT_PRIORITY;
+	f.priority = r->priority + DEFAULT_PRIORITY;
 	f.headers = r->headers;
 	f.scheme = r->scheme.size ? r->scheme : C("https");
 	f.protocol = r->protocol.size ? r->protocol : DEFAULT_PROTOCOL;
 	f.method = r->method.size ? r->method : C("GET");
+	f.path = r->path;
 	f.host = r->host;
 
 	if (f.priority < 0) {
@@ -416,7 +438,7 @@ static int start(spdy_connection* c, spdy_stream* p, spdy_stream* s, spdy_reques
 
 	// Setup stream
 	s->connection = c;
-	s->id = c->next_stream;
+	s->id = f.stream;
 	s->err = 0;
 	s->tx = r->finished ? FINISHED : WAIT_FIRST_DATA;
 	s->rx = r->unidirectional ? FINISHED : WAIT_REPLY;
@@ -750,10 +772,18 @@ static int handle_syn_reply(spdy_connection* c, d_Slice(char) d) {
 		}
 	}
 
-	s->rx = f.finished ? FINISHED : WAIT_FIRST_DATA;
+	s->rx = WAIT_FIRST_DATA;
 
 	if (s->reply) {
 		s->reply(s->reply_user, &r);
+	}
+
+	if (f.finished && s->tx == FINISHED) {
+		int si;
+		dhi_find(&c->streams, s->id, &si);
+		finish_stream(c, s, si, SPDY_FINISHED);
+	} else if (f.finished) {
+		s->rx = FINISHED;
 	}
 
 	return 0;
@@ -803,7 +833,7 @@ static int flush_send(spdy_connection* c) {
 
 	// Try and flush what we already have buffered
 	err = flush_tbuf(c);
-	if (err || c->tx_wait) {
+	if (err || c->waiting_for_write || c->write_after_read) {
 		return err;
 	}
 
@@ -813,11 +843,11 @@ static int flush_send(spdy_connection* c) {
 	// to the next. Set the flushing value to stop finish_stream
 	// from removing streams from pstreams whilst we iterate over it.
 	c->flushing = true;
-	for (i = 0; i < NUM_PRIORITIES && !c->tx_wait; i++) {
+	for (i = 0; i < NUM_PRIORITIES && !c->waiting_for_write && !c->write_after_read; i++) {
 		d_Vector(stream)* v = &c->pstreams[i];
 		int left = v->size;
 
-		while (!c->tx_wait && left > 0) {
+		while (left > 0 && !c->waiting_for_write && !c->write_after_read) {
 			int j = rand() % left;
 			spdy_stream* s = v->data[j];
 
@@ -876,7 +906,7 @@ static int handle_window_update(spdy_connection* c, d_Slice(char) d) {
 	// If we were waiting on the window, figure out what we are now
 	// waiting on.
 
-	if (c->tx_wait) {
+	if (c->waiting_for_write || c->write_after_read) {
 		// Now waiting on the socket
 		s->tx = WAIT_SOCKET;
 		dv_append1(&c->pstreams[s->tx_priority], s);
@@ -1006,7 +1036,7 @@ int spdyS_send(spdy_stream* s, d_Slice(char) data, int compressed) {
 		return SPDY_API;
 	}
 
-	if (c->tx_wait) {
+	if (c->waiting_for_write || c->write_after_read) {
 		s->tx = WAIT_SOCKET;
 		dv_append1(&c->pstreams[s->tx_priority], s);
 		return 0;
@@ -1110,22 +1140,22 @@ static int handle_data(spdy_connection* c, d_Slice(char) d) {
 
 	s->remote_rx_window -= f.size;
 
-	if (f.finished) {
-		s->rx = FINISHED;
-	}
-
 	if (f.size > 0 && s->recv) {
+		s->rx = f.finished ? FINISHED : WAIT_DATA;
 		s->recv(s->recv_user,
 			       	f.finished ? SPDY_FINISHED : SPDY_CONTINUE,
 				dv_right(d, DATA_HEADER_SIZE),
 			       	f.compressed);
 	}
 
-	if (s->rx == FINISHED && s->tx == FINISHED) {
-		// relookup the stream index in case the callback
+	if (f.finished && s->tx == FINISHED) {
+		// re lookup the stream index in case the callback
 		// added streams
 		dhi_find(&c->streams, s->id, &si);
 		finish_stream(c, s, si, SPDY_STREAM_ALREADY_CLOSED);
+
+	} else if (f.finished) {
+		s->rx = FINISHED;
 	}
 
 	return 0;
@@ -1154,9 +1184,11 @@ static int parse(spdy_connection* c, uint32_t type, d_Slice(char) d) {
 }
 
 static int flush_recv(spdy_connection* c) {
+	c->read_after_write = 0;
 	for (;;) {
 		d_Slice(char) d;
 		int read;
+		int wait_to_send = 0;
 
 		if (c->rbuf.size > c->default_rx_window + DATA_HEADER_SIZE) {
 			return -1;
@@ -1166,22 +1198,17 @@ static int flush_recv(spdy_connection* c) {
 
 		read = BIO_read(c->io, c->rbuf.data + c->rbuf.size, dv_reserved(c->rbuf) - c->rbuf.size);
 
+		if (read <= 0 && !BIO_should_retry(c->io)) {
+			ERR_print_errors_cb(&log_ssl_error, c);
+			return -1;
+		}
+
+		if (c->write_after_read) {
+			int err = flush_send(c);
+			if (err) return err;
+		}
+
 		if (read <= 0) {
-			if (!BIO_should_retry(c->io)) {
-				return -1;
-			}
-
-			if (BIO_should_read(c->io)) {
-				c->rx_wait |= WAIT_RECV;
-			}
-
-			if (BIO_should_write(c->io) && (c->tx_wait & WAIT_SEND) == 0) {
-				c->rx_wait |= WAIT_SEND;
-				if (c->send_wait) {
-					c->send_wait(c->send_wait_user);
-				}
-			}
-
 			return 0;
 		}
 
@@ -1208,40 +1235,11 @@ static int flush_recv(spdy_connection* c) {
 }
 
 int spdyC_send_ready(spdy_connection* c) {
-	int err;
-
-	if (c->tx_wait & WAIT_SEND) {
-		c->tx_wait &= ~WAIT_SEND;
-		err = flush_send(c);
-		if (err) return err;
-	}
-
-	if (c->rx_wait & WAIT_SEND) {
-		c->rx_wait &= ~WAIT_SEND;
-		err = flush_recv(c);
-		if (err) return err;
-	}
-
-	return 0;
+	return flush_send(c);
 }
 
-
 int spdyC_recv_ready(spdy_connection* c) {
-	int err;
-
-	if (c->tx_wait & WAIT_RECV) {
-		c->tx_wait &= ~WAIT_RECV;
-		err = flush_send(c);
-		if (err) return err;
-	}
-
-	if (c->rx_wait) {
-		c->rx_wait &= ~WAIT_RECV;
-		err = flush_recv(c);
-		if (err) return err;
-	}
-
-	return 0;
+	return flush_recv(c);
 }
 
 void spdyS_on_recv(spdy_stream* s, spdy_data_fn cb, void* user) {
@@ -1264,7 +1262,7 @@ void spdyS_on_send_ready(spdy_stream* s, spdy_fn cb, void* user) {
 	s->send_ready_user = user;
 }
 
-void spdyC_on_send_wait(spdy_connection* c, spdy_fn cb, void* user) {
+void spdyC_on_send_wait(spdy_connection* c, spdy_send_wait_fn cb, void* user) {
 	c->send_wait = cb;
 	c->send_wait_user = user;
 }
@@ -1279,8 +1277,10 @@ void spdyC_on_request(spdy_connection* c, spdy_request_fn cb, void* user) {
 #define PROXY_READ_NL ((uintptr_t) 4)
 
 struct proxy {
-	d_Vector(char) vec;
-	d_Slice(char) out;
+	d_Vector(char) tx;
+	d_Vector(char) rx;
+	int txoff;
+	int rxoff;
 	bool read;
 	bool read_newline;
 };
@@ -1293,8 +1293,8 @@ static int proxy_write(BIO *b, const char *buf, int num) {
 		return 0;
 	}
 
-	if (c->out.size) {
-		written = BIO_write(b->next_bio, c->out.data, c->out.size);
+	if (c->tx.size > c->txoff) {
+		written = BIO_write(b->next_bio, c->tx.data + c->txoff, c->tx.size - c->txoff);
 		BIO_clear_retry_flags(b);
 		BIO_copy_next_retry(b);
 
@@ -1302,9 +1302,9 @@ static int proxy_write(BIO *b, const char *buf, int num) {
 			return written;
 		}
 
-		c->out = dv_right(c->out, written);
+		c->txoff += written;
 
-		if (c->out.size) {
+		if (c->tx.size > c->txoff) {
 			BIO_set_retry_write(b);
 			return 0;
 		}
@@ -1325,16 +1325,38 @@ static int proxy_read(BIO *b, char* buf, int size) {
 		return 0;
 	}
 
-	read = BIO_read(b->next_bio, buf, size);
-	BIO_clear_retry_flags(b);
-	BIO_copy_next_retry(b);
+	if (!c->read) {
+		if (c->rx.size > c->rxoff) {
+			int tocopy = c->rx.size - c->rxoff > size ? size : c->rx.size - c->rxoff;
+			memcpy(buf, c->rx.data + c->rxoff, tocopy);
+			size -= tocopy;
+			buf += tocopy;
+			c->rxoff += tocopy;
 
-	if (read <= 0 || !c->read) {
+			if (size == 0) {
+				return tocopy;
+			}
+		}
+
+		read = BIO_read(b->next_bio, buf, size);
+		BIO_clear_retry_flags(b);
+		BIO_copy_next_retry(b);
 		return read;
 	}
 
-	p = buf;
-	e = buf + read;
+	dv_reserve(&c->rx, c->rx.size + 512);
+	read = BIO_read(b->next_bio, c->rx.data + c->rx.size, dv_reserved(c->rx) - c->rx.size);
+	BIO_clear_retry_flags(b);
+	BIO_copy_next_retry(b);
+
+	if (read <= 0) {
+		return read;
+	}
+
+	p = c->rx.data + c->rx.size;
+	e = p + read;
+
+	dv_resize(&c->rx, c->rx.size + read);
 
 	if (c->read_newline) {
 		goto have_newline;
@@ -1367,9 +1389,11 @@ static int proxy_read(BIO *b, char* buf, int size) {
 		}
 
 		if (*p == '\n') {
+			int tocopy = e - p > size ? size : e - p;
+			c->rxoff = p - c->rx.data + tocopy;
+			memcpy(buf, p, tocopy);
 			c->read = false;
-			memmove(buf, p, e - p);
-			return e - p;
+			return tocopy;
 		}
 
 		c->read_newline = false;
@@ -1388,7 +1412,8 @@ static int proxy_new(BIO *b) {
 static int proxy_free(BIO *b) {
 	struct proxy* c = (struct proxy*) b->ptr;
 	if (c) {
-		dv_free(c->vec);
+		dv_free(c->tx);
+		dv_free(c->rx);
 		free(c);
 	}
 	b->init = 0;
@@ -1401,11 +1426,11 @@ static long proxy_ctrl(BIO* b, int cmd, long larg, void *parg) {
 	struct proxy* c = (struct proxy*) b->ptr;
 
 	if (c != NULL && cmd == SET_PROXY) {
-		dv_clear(&c->vec);
-		dv_print(&c->vec, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n",
+		dv_clear(&c->tx);
+		dv_print(&c->tx, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n",
 				(char*) parg,
 				(char*) parg);
-		c->out = c->vec;
+		c->txoff = 0;
 	}
 
 	return 0;
@@ -1418,20 +1443,24 @@ static BIO_METHOD proxy_method = {
 	proxy_read,
 	NULL,
 	NULL,
-	NULL,
+	proxy_ctrl,
 	proxy_new,
 	proxy_free,
 	NULL,
 };
 
+#define NPN "\x06spdy/3"
+
+static int next_proto_cb(SSL *s, unsigned char **out, unsigned char *outlen, const unsigned char *in, unsigned int inlen, void *arg) {
+	SSL_select_next_proto(out, outlen, in, inlen, NPN, sizeof(NPN)-1);
+	return SSL_TLSEXT_ERR_OK;
+}
+
 spdy_connection* spdyC_connect(const char* host, SSL_CTX* ctx, int* fd) {
 	const char* proxy;
 	BIO* io;
 
-	io = BIO_new(BIO_s_connect());
-	BIO_set_conn_hostname(io, host);
-	BIO_set_nbio(io, 1);
-	BIO_get_fd(io, fd);
+	SSL_CTX_set_next_proto_select_cb(ctx, &next_proto_cb, NULL);
 
 	proxy = getenv("http_proxy");
 	if (!proxy) {
@@ -1439,9 +1468,23 @@ spdy_connection* spdyC_connect(const char* host, SSL_CTX* ctx, int* fd) {
 	}
 
 	if (proxy) {
-		BIO* prx = BIO_new(&proxy_method);
-		BIO_ctrl(prx, SET_PROXY, 0, (void*) proxy);
-		io = BIO_push(prx, io);
+		BIO *prx, *con;
+		con = BIO_new(BIO_s_connect());
+		BIO_set_conn_hostname(con, proxy);
+		BIO_set_nbio(con, 1);
+		BIO_do_connect(con);
+		BIO_get_fd(con, fd);
+
+		prx = BIO_new(&proxy_method);
+		BIO_ctrl(prx, SET_PROXY, 0, (void*) host);
+
+		io = BIO_push(prx, con);
+	} else {
+		io = BIO_new(BIO_s_connect());
+		BIO_set_conn_hostname(io, host);
+		BIO_set_nbio(io, 1);
+		BIO_do_connect(io);
+		BIO_get_fd(io, fd);
 	}
 
 	if (ctx) {

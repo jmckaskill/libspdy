@@ -27,9 +27,10 @@
 
 DHASH_INIT_STR(hdr, d_Slice(char));
 
+extern const char DICTIONARY[];
+
 struct spdy_headers {
 	d_StringHash(hdr) h;
-	d_Vector(char) v;
 };
 
 void parse_frame(uint32_t* type, int* length, const char* data);
