@@ -174,7 +174,7 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 
 	dh_clear(&hdrs->h);
 
-	err = dz_inflate(buf, z, d, dv_char(DICTIONARY));
+	err = dz_inflate_dict(buf, z, d, dv_char(DICTIONARY));
 	if (err) return err;
 
 	d = *buf;
@@ -215,10 +215,11 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 		val = dv_left(d, vlen);
 		d = dv_right(d, vlen);
 
-		// From RFC822, headers are allowed to have any ASCII
-		// character except CTLs, SPACE, and ':'.  The spdy spec
-		// further restricts this to only upper case and allowing : as
-		// the first character.
+		/* From RFC822, headers are allowed to have any ASCII
+		 * character except CTLs, SPACE, and ':'.  The spdy spec
+		 * further restricts this to only upper case and allowing : as
+		 * the first character.
+		 */
 		for (j = 0; j < key.size; j++) {
 			if (key.data[j] <= ' ' /* space, ctls and 8 bit for signed char */
 					|| key.data[j] >= 0x7F /* delete and 8 bit for unsigned char */
@@ -245,10 +246,11 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 			} else if (dv_equals(key, C(":path"))) {
 				e->path = val;
 			}
-			// Ignore other internal headers that we don't
-			// understand
+			/* Ignore other internal headers that we don't
+			 * understand
+			 */
 		} else {
-			// Headers must be unique
+			/* Headers must be unique */
 			int vi;
 			if (!dhs_add(&hdrs->h, key, &vi)) {
 				return SPDY_PROTOCOL;
@@ -417,7 +419,7 @@ int parse_rst_stream(int* stream, int* error, d_Slice(char) d) {
 	*stream = (int) r32(h->stream);
 	*error = -(int) r32(h->error);
 
-	// Filter out errors that would collide with API errors
+	/* Filter out errors that would collide with API errors */
 	if (*error <= SPDY_GO_AWAY || *error >= 0) {
 		*error = SPDY_PROTOCOL;
 	}

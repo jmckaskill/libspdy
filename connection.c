@@ -200,7 +200,7 @@ static void log_rst_stream(spdy_connection* c, const char* dir, int stream, int 
 
 static int log_ssl_error(const char* str, size_t len, void* u) {
 	spdy_connection* c = (spdy_connection*) u;
-	Log(c, "ssl: %.*s\n", len, str);
+	Log(c, "ssl: %.*s\n", (int) len, str);
 	return len;
 }
 
@@ -215,8 +215,9 @@ spdy_connection* spdyC_new(BIO* io, int io_close) {
 	c->io = io;
 	c->io_close = io_close != 0;
 
-	// Default setup is for a client, we auto detect a server in
-	// handle_syn_stream
+	/* Default setup is for a client, we auto detect a server in
+	 * handle_syn_stream
+	 */
 	c->next_stream = 1;
 	c->next_ping = 1;
 
@@ -256,7 +257,7 @@ static void finish_stream(spdy_connection* c, spdy_stream* s, int si, int err) {
 		dv_find(*p, s, &i);
 		assert(i >= 0);
 		if (c->flushing) {
-			// flusher will pick this up next round
+			/* flusher will pick this up next round */
 			p->data[i] = NULL;
 		} else {
 			p->data[i] = p->data[p->size-1];
@@ -306,8 +307,9 @@ void spdyC_free(spdy_connection* c) {
 		return;
 	}
 
-	// Stop new streams from being created, otherwise we can't safely
-	// iterate over c->streams.
+	/* Stop new streams from being created, otherwise we can't safely
+	 * iterate over c->streams.
+	 */
 	c->go_away = true;
 
 	spdyS_deref(c->immediate_stream);
@@ -315,8 +317,9 @@ void spdyC_free(spdy_connection* c) {
 	i = -1;
 	while (dh_hasnext(&c->streams, &i)) {
 		spdy_stream* s = c->streams.vals[i];
-		// We only need to stop the root streams, finish_stream will
-		// clean up the children recursively
+		/* We only need to stop the root streams, finish_stream will
+		 * clean up the children recursively
+		 */
 		if (s->parent == NULL) {
 			finish_stream(c, s, i, SPDY_CONNECTION_CLOSED);
 		}
@@ -351,12 +354,12 @@ static int flush_tbuf(spdy_connection* c) {
 	c->write_after_read = 0;
 	sent = BIO_write(c->io, c->tbuf.data, c->tbuf.size);
 
-	// Remove any data that was sent from the buffer
+	/* Remove any data that was sent from the buffer */
 	if (sent > 0) {
 		dv_erase(&c->tbuf, 0, sent);
 	}
 
-	// Check to see why we couldn't send all of the data
+	/* Check to see why we couldn't send all of the data */
 	if (c->tbuf.size) {
 		if (!BIO_should_retry(c->io)) {
 			ERR_print_errors_cb(&log_ssl_error, c);
@@ -430,13 +433,14 @@ static int start(spdy_connection* c, spdy_stream* p, spdy_stream* s, spdy_reques
 
 	c->next_stream += 2;
 
-	// unidirectional and immediate finish messages never
-	// get added to the streams table
+	/* unidirectional and immediate finish messages never
+	 * get added to the streams table
+	 */
 	if (r->finished && r->unidirectional) {
 		return 0;
 	}
 
-	// Setup stream
+	/* Setup stream */
 	s->connection = c;
 	s->id = f.stream;
 	s->err = 0;
@@ -447,7 +451,7 @@ static int start(spdy_connection* c, spdy_stream* p, spdy_stream* s, spdy_reques
 	s->tx_window = c->default_tx_window;
 	s->tx_priority = f.priority;
 
-	// Add to stream table
+	/* Add to stream table */
 	spdyS_ref(s);
 	dhi_set(&c->streams, s->id, s);
 
@@ -486,12 +490,13 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 
 	log_syn_stream(c, "rx", &f);
 
-	// The remote has reopened an already opened stream. We kill both.
-	// Check this first as if any other check fails and this would've also
-	// failed sending out the reset will invalidate the existing stream.
-	//
-	// Messages that have both their rx and tx pipes already closed don't
-	// need to be added to the streams table.
+	/* The remote has reopened an already opened stream. We kill both.
+	 * Check this first as if any other check fails and this would've also
+	 * failed sending out the reset will invalidate the existing stream.
+	 *
+	 * Messages that have both their rx and tx pipes already closed don't
+	 * need to be added to the streams table.
+	 */
 	if ((f.finished && f.unidirectional)
 	       	? dhi_find(&c->streams, f.stream, &si)
 		: !dhi_add(&c->streams, f.stream, &si)) {
@@ -501,41 +506,45 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 		return err;
 	}
 
-	// After a go away has been sent/received, we just ignore incoming
-	// streams
+	/* After a go away has been sent/received, we just ignore incoming
+	 * streams
+	 */
 	if (c->go_away) {
 		return 0;
 	}
 
-	// Detect that we are the server
+	/* Detect that we are the server */
 	if (c->next_stream == 1 && c->last_remote_stream == 0 && (f.stream & 1)) {
 		c->next_stream = 2;
 		c->next_ping = 0;
 	}
 
-	// The remote tried to open a stream of the wrong type (eg its a
-	// client and tried to open a server stream).
+	/* The remote tried to open a stream of the wrong type (eg its a
+	 * client and tried to open a server stream).
+	 */
 	if ((f.stream & 1) == (c->next_stream & 1)) {
 		err = SPDY_PROTOCOL;
 		goto reset;
 	}
 
-	// Stream Ids must monotonically increase
+	/* Stream Ids must monotonically increase */
 	if (f.stream <= c->last_remote_stream) {
 		err = SPDY_PROTOCOL;
 		goto reset;
 	}
 
 	if (f.associated_stream > 0) {
-		// You are only allowed to open associated streams to streams
-		// that you are the recipient.
+		/* You are only allowed to open associated streams to streams
+		 * that you are the recipient.
+		 */
 		if ((f.associated_stream & 1) != (c->next_stream & 1)) {
 			err = SPDY_PROTOCOL;
 			goto reset;
 		}
 
-		// The remote tried to open a stream associated with a closed
-		// stream. We kill this new stream.
+		/* The remote tried to open a stream associated with a closed
+		 * stream. We kill this new stream.
+		 */
 		if (!dhi_get(&c->streams, f.associated_stream, &parent)) {
 			err = SPDY_INVALID_STREAM;
 			goto reset;
@@ -550,8 +559,9 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 		goto reset;
 	}
 
-	// The SYN_STREAM passed all of our tests, so go ahead and create the
-	// stream and hook it up.
+	/* The SYN_STREAM passed all of our tests, so go ahead and create the
+	 * stream and hook it up.
+	 */
 
 	r.finished = f.finished;
 	r.unidirectional = f.unidirectional;
@@ -563,10 +573,11 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 	r.headers = f.headers;
 	r.priority = f.priority - DEFAULT_PRIORITY;
 
-	// Messages that have both their rx and tx pipes already closed don't
-	// need to be added to the streams table.
+	/* Messages that have both their rx and tx pipes already closed don't
+	 * need to be added to the streams table.
+	 */
 	if (f.finished && f.unidirectional) {
-		// Use a cached stream
+		/* Use a cached stream */
 		if (c->immediate_stream) {
 			s = c->immediate_stream;
 			c->immediate_stream = NULL;
@@ -587,7 +598,7 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 		}
 	}
 
-	// Setup the stream
+	/* Setup the stream */
 	s->connection = c;
 	s->id = f.stream;
 	s->err = 0;
@@ -603,22 +614,22 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 	s->request = NULL;
 	s->send_ready = NULL;
 
-	// Notify the user of the new request
+	/* Notify the user of the new request */
 	spdyS_ref(s);
 	cb(user, s, &r);
 
-	// Try and put immediate streams back into the cache
+	/* Try and put immediate streams back into the cache */
 	if (!(f.finished && f.unidirectional)) {
 		spdyS_deref(s);
 		return 0;
 	}
 
-	// The user has taken control of this stream
+	/* The user has taken control of this stream */
 	if (deref(&s->ref) > 0) {
 		return 0;
 	}
 
-	// Put the stream back in the cache
+	/* Put the stream back in the cache */
 	spdyS_ref(s);
 	c->immediate_stream = s;
 	return 0;
@@ -639,7 +650,7 @@ static d_Slice(char) lookup_status(int status, d_Slice(char) str, d_Vector(char)
 	case HTTP_CONTINUE:                  return C("100 Continue");
 	case HTTP_SWITCHING_PROTOCOLS:       return C("101 Switching Protocols");
 
-	case 0: // default status if the reply is memset to 0
+	case 0: /* default status if the reply is memset to 0 */
 	case HTTP_OK:                        return C("200 OK");
 	case HTTP_CREATED:		     return C("201 Created");
 	case HTTP_ACCEPTED:                  return C("202 Accepted");
@@ -732,7 +743,7 @@ static int handle_syn_reply(spdy_connection* c, d_Slice(char) d) {
 	}
 	s = c->streams.vals[si];
 
-	// Can't send a reply to your own request
+	/* Can't send a reply to your own request */
 	if ((f.stream & 1) != (c->next_stream & 1)) {
 		err = send_reset(c, f.stream, SPDY_PROTOCOL);
 		finish_stream(c, s, si, SPDY_PROTOCOL);
@@ -818,7 +829,7 @@ static int handle_ping(spdy_connection* c, d_Slice(char) d) {
 
 	log_ping(c, "rx", id);
 
-	// Ignore loopback pings
+	/* Ignore loopback pings */
 	if ((id & 1) == (c->next_ping & 1)) {
 		return 0;
 	}
@@ -831,17 +842,18 @@ static int handle_ping(spdy_connection* c, d_Slice(char) d) {
 static int flush_send(spdy_connection* c) {
 	int i, err;
 
-	// Try and flush what we already have buffered
+	/* Try and flush what we already have buffered */
 	err = flush_tbuf(c);
 	if (err || c->waiting_for_write || c->write_after_read) {
 		return err;
 	}
 
-	// We have flushed the tx buffer, so now try and flush streams that
-	// are waiting to send. We choose streams randomly in each priority
-	// level, but finish all streams in a given priority before going on
-	// to the next. Set the flushing value to stop finish_stream
-	// from removing streams from pstreams whilst we iterate over it.
+	/* We have flushed the tx buffer, so now try and flush streams that
+	 * are waiting to send. We choose streams randomly in each priority
+	 * level, but finish all streams in a given priority before going on
+	 * to the next. Set the flushing value to stop finish_stream
+	 * from removing streams from pstreams whilst we iterate over it.
+	 */
 	c->flushing = true;
 	for (i = 0; i < NUM_PRIORITIES && !c->waiting_for_write && !c->write_after_read; i++) {
 		d_Vector(stream)* v = &c->pstreams[i];
@@ -851,8 +863,9 @@ static int flush_send(spdy_connection* c) {
 			int j = rand() % left;
 			spdy_stream* s = v->data[j];
 
-			// Need to hold a ref in case it finishes in the
-			// callback
+			/* Need to hold a ref in case it finishes in the
+			 * callback
+			 */
 			if (s) {
 				assert(s->tx == WAIT_SOCKET);
 				spdyS_ref(s);
@@ -861,14 +874,16 @@ static int flush_send(spdy_connection* c) {
 				}
 			}
 
-			// Compact the remaining streams to be processed to
-			// the head of the vector.
+			/* Compact the remaining streams to be processed to
+			 * the head of the vector.
+			 */
 			v->data[j] = v->data[left-1];
 			v->data[left-1] = s;
 
-			// This stream gets removed from the vector if it
-			// managed to fully flush, changed priorities or was
-			// closed.
+			/* This stream gets removed from the vector if it
+			 * managed to fully flush, changed priorities or was
+			 * closed.
+			 */
 			if (v->data[left-1] == NULL) {
 				assert(s == NULL || s->tx != WAIT_SOCKET);
 				v->data[left-1] = v->data[v->size-1];
@@ -903,15 +918,16 @@ static int handle_window_update(spdy_connection* c, d_Slice(char) d) {
 		return 0;
 	}
 
-	// If we were waiting on the window, figure out what we are now
-	// waiting on.
+	/* If we were waiting on the window, figure out what we are now
+	 * waiting on.
+	 */
 
 	if (c->waiting_for_write || c->write_after_read) {
-		// Now waiting on the socket
+		/* Now waiting on the socket */
 		s->tx = WAIT_SOCKET;
 		dv_append1(&c->pstreams[s->tx_priority], s);
 	} else {
-		// Now waiting on the user
+		/* Now waiting on the user */
 		s->tx = WAIT_DATA;
 		if (s->send_ready) {
 			s->send_ready(s->send_ready_user);
@@ -955,7 +971,7 @@ int spdyS_send_close(spdy_stream* s) {
 		return SPDY_STREAM_ALREADY_CLOSED;
 
 	case WAIT_REPLY:
-		// Send an empty reply with the finished flag set
+		/* Send an empty reply with the finished flag set */
 		rf.finished = true;
 		rf.stream = s->id;
 		rf.headers = NULL;
@@ -969,7 +985,7 @@ int spdyS_send_close(spdy_stream* s) {
 	case WAIT_WINDOW:
 	case WAIT_FIRST_DATA:
 	case WAIT_DATA:
-		// Send an empty data frame with the finished flag set
+		/* Send an empty data frame with the finished flag set */
 		df.finished = true;
 		df.compressed = s->tx_compressed;
 		df.stream = s->id;
@@ -985,7 +1001,7 @@ int spdyS_send_close(spdy_stream* s) {
 
 	s->tx = FINISHED;
 
-	// Remove the stream from the connection if we are now all finished
+	/* Remove the stream from the connection if we are now all finished */
 	if (s->tx == FINISHED && s->rx == FINISHED) {
 		int si;
 		dhi_find(&c->streams, s->id, &si);
@@ -1017,11 +1033,11 @@ int spdyS_send(spdy_stream* s, d_Slice(char) data, int compressed) {
 		memset(&r, 0, sizeof(r));
 		err = spdyS_reply(s, &r);
 		if (err) return err;
-		// fallthrough
+		/* fallthrough */
 	case WAIT_FIRST_DATA:
 		s->tx_compressed = compressed;
 		s->tx = WAIT_DATA;
-		// fallthrough
+		/* fallthrough */
 	case WAIT_DATA:
 		break;
 
@@ -1074,6 +1090,14 @@ int spdyS_recv_ready(spdy_stream* s, int size) {
 	spdy_connection* c = s->connection;
 	int delta;
 
+	if (s->rx == FINISHED) {
+		return 0;
+	}
+
+	if (s->err) {
+		return s->err;
+	}
+
 	s->user_rx_window += size;
 	delta = s->user_rx_window - s->remote_rx_window;
 
@@ -1124,8 +1148,9 @@ static int handle_data(spdy_connection* c, d_Slice(char) d) {
 
 	assert(s->rx == WAIT_DATA);
 
-	// Streams are not allowed to change from compress to non-compress mid
-	// way through
+	/* Streams are not allowed to change from compress to non-compress mid
+	 * way through
+	 */
 	if (s->rx_compressed != f.compressed) {
 		err = send_reset(c, f.stream, SPDY_PROTOCOL);
 		finish_stream(c, s, si, SPDY_PROTOCOL);
@@ -1149,8 +1174,9 @@ static int handle_data(spdy_connection* c, d_Slice(char) d) {
 	}
 
 	if (f.finished && s->tx == FINISHED) {
-		// re lookup the stream index in case the callback
-		// added streams
+		/* re lookup the stream index in case the callback
+		 * added streams
+		 */
 		dhi_find(&c->streams, s->id, &si);
 		finish_stream(c, s, si, SPDY_STREAM_ALREADY_CLOSED);
 
@@ -1175,7 +1201,7 @@ static int parse(spdy_connection* c, uint32_t type, d_Slice(char) d) {
 		case WINDOW_UPDATE:
 			return handle_window_update(c, d);
 		default:
-			// ignore unknown messages
+			/* ignore unknown messages */
 			return 0;
 		}
 	} else {
@@ -1188,7 +1214,6 @@ static int flush_recv(spdy_connection* c) {
 	for (;;) {
 		d_Slice(char) d;
 		int read;
-		int wait_to_send = 0;
 
 		if (c->rbuf.size > c->default_rx_window + DATA_HEADER_SIZE) {
 			return -1;
@@ -1362,7 +1387,7 @@ static int proxy_read(BIO *b, char* buf, int size) {
 		goto have_newline;
 	}
 
-	// Consume data until we get two newlines in a row
+	/* Consume data until we get two newlines in a row */
 	for (;;) {
 		p = memchr(p, '\n', e - p);
 		if (p == NULL) {
@@ -1452,7 +1477,7 @@ static BIO_METHOD proxy_method = {
 #define NPN "\x06spdy/3"
 
 static int next_proto_cb(SSL *s, unsigned char **out, unsigned char *outlen, const unsigned char *in, unsigned int inlen, void *arg) {
-	SSL_select_next_proto(out, outlen, in, inlen, NPN, sizeof(NPN)-1);
+	SSL_select_next_proto(out, outlen, in, inlen, (uint8_t*) NPN, sizeof(NPN)-1);
 	return SSL_TLSEXT_ERR_OK;
 }
 

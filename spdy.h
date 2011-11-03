@@ -109,7 +109,7 @@ struct spdy_reply {
 typedef void (*spdy_fn)(void*);
 typedef void (*spdy_send_wait_fn)(void*, int enable);
 typedef void (*spdy_data_fn)(void*, int sts, spdy_string, int compressed);
-typedef void (*spdy_request_fn)(void*, spdy_stream*, spdy_request*);
+typedef int (*spdy_request_fn)(void*, spdy_stream*, spdy_request*);
 typedef void (*spdy_reply_fn)(void*, spdy_reply*);
 
 spdy_stream* spdyS_new(void);
@@ -119,7 +119,7 @@ void spdyS_deref(spdy_stream* s);
 int spdyS_start(spdy_stream* parent, spdy_stream* s, spdy_request* r);
 int spdyS_reply(spdy_stream* s, spdy_reply* r);
 int spdyS_send(spdy_stream* s, spdy_string data, int compressed);
-int spdyS_close(spdy_stream* s);
+int spdyS_send_close(spdy_stream* s);
 int spdyS_recv_ready(spdy_stream* s, int size);
 
 void spdyS_on_recv(spdy_stream* s, spdy_data_fn cb, void* user);
