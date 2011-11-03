@@ -285,7 +285,7 @@ static void finish_stream(spdy_connection* c, spdy_stream* s, int si, int err) {
 	}
 
 	for (i = 0; i < s->children.size; i++) {
-		int ci;
+		int ci = -1;
 		spdy_stream* ch = s->children.data[i];
 		dhi_find(&c->streams, ch->id, &ci);
 		ch->parent = NULL;
@@ -426,6 +426,13 @@ static int start(spdy_connection* c, spdy_stream* p, spdy_stream* s, spdy_reques
 		f.priority = NUM_PRIORITIES - 1;
 	}
 
+	if (f.headers) {
+		spdyH_del(f.headers, "connection");
+		spdyH_del(f.headers, "keep-alive");
+		spdyH_del(f.headers, "proxy-connection");
+		spdyH_del(f.headers, "transfer-encoding");
+	}
+
 	log_syn_stream(c, "tx", &f);
 	marshal_syn_stream(&c->tbuf, &f, &c->zout);
 	err = flush_tbuf(c);
@@ -482,7 +489,7 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 	struct syn_stream f;
 	spdy_request r;
 	int err;
-	int si;
+	int si = -1;
 
 	f.headers = c->headers;
 	err = parse_syn_stream(&f, d, &c->zin, &c->hdrbuf);
@@ -721,6 +728,13 @@ int spdyS_reply(spdy_stream* s, spdy_reply* r) {
 	f.status = lookup_status(r->status, r->status_string, &c->sbuf);
 	f.protocol = r->protocol.size ? r->protocol : DEFAULT_PROTOCOL;
 
+	if (f.headers) {
+		spdyH_del(f.headers, "connection");
+		spdyH_del(f.headers, "keep-alive");
+		spdyH_del(f.headers, "proxy-connection");
+		spdyH_del(f.headers, "transfer-encoding");
+	}
+
 	log_syn_reply(c, "tx", &f);
 	marshal_syn_reply(&c->tbuf, &f, &c->zout);
 	return flush_tbuf(c);
@@ -790,7 +804,7 @@ static int handle_syn_reply(spdy_connection* c, d_Slice(char) d) {
 	}
 
 	if (f.finished && s->tx == FINISHED) {
-		int si;
+		int si = -1;
 		dhi_find(&c->streams, s->id, &si);
 		finish_stream(c, s, si, SPDY_FINISHED);
 	} else if (f.finished) {
@@ -939,7 +953,7 @@ static int handle_window_update(spdy_connection* c, d_Slice(char) d) {
 
 int spdyS_cancel(spdy_stream* s) {
 	spdy_connection* c = s->connection;
-	int si, err, reason;
+	int si = -1, err, reason;
 
 	if (s->err) {
 		return s->err;
@@ -1003,7 +1017,7 @@ int spdyS_send_close(spdy_stream* s) {
 
 	/* Remove the stream from the connection if we are now all finished */
 	if (s->tx == FINISHED && s->rx == FINISHED) {
-		int si;
+		int si = -1;
 		dhi_find(&c->streams, s->id, &si);
 		finish_stream(c, s, si, SPDY_STREAM_ALREADY_CLOSED);
 	}

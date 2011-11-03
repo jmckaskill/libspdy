@@ -8,10 +8,15 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
 #endif
 
 #ifdef __MACH__
 #include <sys/event.h>
+#endif
+
+#ifdef __linux__
+#include <sys/epoll.h>
 #endif
 
 #include <errno.h>
@@ -94,7 +99,10 @@ static int connect_tcp(d_Slice(char) url) {
 			continue;
 		}
 
-		if (connect(sfd, rp->ai_addr, (int) rp->ai_addrlen)) {
+		fcntl(sfd, F_SETFL, O_NONBLOCK);
+		fcntl(sfd, F_SETFD, FD_CLOEXEC);
+
+		if (connect(sfd, rp->ai_addr, (int) rp->ai_addrlen) && errno != EINPROGRESS) {
 			closesocket(sfd);
 			continue;
 		}
@@ -168,11 +176,16 @@ static int send_reply(struct conn* c) {
 	d = dv_left(d, idx);
 	h = spdyH_new();
 
+	rep.protocol = dv_split_left(&d, ' ');
 	rep.status = dv_to_integer(dv_split_left(&d, ' '), 10, HTTP_BAD_GATEWAY);
+	rep.status_string = dv_split_line(&d);
+	rep.headers = h;
 
 	for (;;) {
 		d_Slice(char) line, key, val;
+		int i;
 
+next_header:
 		line = dv_split_line(&d);
 		if (!line.size) {
 			break;
@@ -182,16 +195,29 @@ static int send_reply(struct conn* c) {
 		val = dv_strip_whitespace(line);
 
 		key.data[key.size] = '\0';
+		for (i = 0; i < key.size; i++) {
+			if ('A' <= key.data[i] && key.data[i] <= 'Z') {
+				key.data[i] += 'a' - 'A';
+			} else if (key.data[i] == ':' || key.data[i] <= ' ' || key.data[i] >= 0x7F) {
+				goto next_header;
+			}
+		}
+
+		if (memchr(val.data, '\0', val.size)) {
+			goto next_header;
+		}
 
 		/* TODO(james): replace with spdyH_add */
 		spdyH_set(h, key.data, val);
 	}
 
 	if (spdyS_reply(c->s, &rep)) {
+		spdyH_free(h);
 		close_conn(c);
 		return -1;
 	}
 
+	spdyH_free(h);
 	dv_erase(&c->rx, 0, idx);
 	c->sent_reply = true;
 	return 0;
@@ -206,7 +232,7 @@ static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 		return HTTP_SERVICE_UNAVAILABLE;
 	}
 
-	fd = connect_tcp(is_connect ? req->host : C("localhost:80"));
+	fd = connect_tcp(is_connect ? req->host : C("example.com:80"));
 	if (fd < 0) {
 		return HTTP_BAD_GATEWAY;
 	}
@@ -214,6 +240,7 @@ static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 	c = (struct conn*) calloc(1, sizeof(struct conn));
 	c->fd = fd;
 	c->s = s;
+	c->send_wait = true;
 	spdyS_ref(s);
 	register_fd(c, fd);
 
@@ -224,6 +251,8 @@ static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 		int idx;
 		const char* key;
 		d_Slice(char) vals, val;
+
+		spdyH_set(req->headers, "connection", C("close"));
 
 		/* Format up the HTTP request */
 		dv_print(&c->tx, "%.*s %.*s %.*s\r\nHost: %.*s\r\n",
@@ -284,6 +313,11 @@ static void fd_read(struct conn* c) {
 			}
 		}
 
+		if (c->fd_finished && c->s_finished) {
+			close_conn(c);
+			return;
+		}
+
 	} while (!c->fd_finished && !c->rx.size);
 
 	return;
@@ -296,11 +330,11 @@ static void stream_write(void* u) {
 }
 
 static void fd_write(struct conn* c) {
-	if (c->rx.size) {
+	if (c->tx.size) {
 		int w;
 
 		do {
-			w = write(c->fd, c->rx.data, c->rx.size);
+			w = write(c->fd, c->tx.data, c->tx.size);
 		} while (w < 0 && errno == EINTR);
 
 		if (w <= 0 && errno == EAGAIN) {
@@ -309,18 +343,18 @@ static void fd_write(struct conn* c) {
 			goto err;
 		}
 
-		dv_erase(&c->rx, 0, w);
+		dv_erase(&c->tx, 0, w);
 
 		if (spdyS_recv_ready(c->s, w)) {
 			goto err;
 		}
 
-		if (c->s_finished && !c->rx.size) {
+		if (c->s_finished && !c->tx.size) {
 			shutdown(c->fd, SHUT_RD);
 		}
 	}
 
-	if ((c->rx.size != 0) != c->send_wait) {
+	if ((c->tx.size != 0) != c->send_wait) {
 		c->send_wait = !c->send_wait;
 		update_send_wait(c, c->fd, c->send_wait);
 	}
@@ -342,11 +376,16 @@ static void stream_read(void* u, int sts, d_Slice(char) data, int compressed) {
 		c->s_finished = true;
 	}
 
-	if (c->rx.size) {
+	if (c->fd_finished && c->s_finished) {
+		close_conn(c);
+		return;
+	}
+
+	if (c->tx.size) {
 		int w;
 
 		do {
-			w = write(c->fd, c->rx.data, c->rx.size);
+			w = write(c->fd, c->tx.data, c->tx.size);
 		} while (w < 0 && errno == EINTR);
 
 		if (w <= 0 && errno == EAGAIN) {
@@ -355,14 +394,14 @@ static void stream_read(void* u, int sts, d_Slice(char) data, int compressed) {
 			goto err;
 		}
 
-		dv_erase(&c->rx, 0, w);
+		dv_erase(&c->tx, 0, w);
 
 		if (spdyS_recv_ready(c->s, w)) {
 			goto err;
 		}
 	}
 
-	if (!c->rx.size && data.size) {
+	if (!c->tx.size && data.size) {
 		int w;
 
 		do {
@@ -382,13 +421,13 @@ static void stream_read(void* u, int sts, d_Slice(char) data, int compressed) {
 		}
 	}
 
-	dv_append(&c->rx, data);
+	dv_append(&c->tx, data);
 
-	if (c->s_finished && !c->rx.size) {
+	if (c->s_finished && !c->tx.size) {
 		shutdown(c->fd, SHUT_WR);
 	}
 
-	if ((c->rx.size != 0) != c->send_wait) {
+	if ((c->tx.size != 0) != c->send_wait) {
 		c->send_wait = !c->send_wait;
 		update_send_wait(c, c->fd, c->send_wait);
 	}
@@ -400,7 +439,7 @@ err:
 }
 
 static void on_timeout(void);
-#define POLL_TIMEOUT 20
+#define POLL_TIMEOUT 400
 
 #ifdef __MACH__
 DVECTOR_INIT(kevent, struct kevent);
@@ -418,7 +457,7 @@ static void register_fd(void* u, int fd) {
 
 	e[1].ident = fd;
 	e[1].filter = EVFILT_WRITE;
-	e[1].flags = EV_ADD | EV_DISABLE;
+	e[1].flags = EV_ADD;
 	e[1].fflags = 0;
 	e[1].udata = u;
 }
@@ -503,13 +542,13 @@ static void main_loop(spdy_connection* client, int* die) {
 DVECTOR_INIT(epoll_event, struct epoll_event);
 static d_Vector(epoll_event) events;
 static int epfd;
-#define POLL_READ EPOLLIN | EPOLLHUP | EPOLLERR
+#define POLL_READ (EPOLLIN | EPOLLHUP | EPOLLERR)
 
-static int register_fd(void* u, int fd) {
+static void register_fd(void* u, int fd) {
 	struct epoll_event e;
-	e.events = POLL_READ;
+	e.events = POLL_READ | EPOLLOUT;
 	e.data.ptr = u;
-	epoll_ctl(epfd, EPOLL_CTL_ADD, fd, e);
+	epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &e);
 }
 
 static void unregister_fd(void* u, int fd) {
@@ -517,8 +556,8 @@ static void unregister_fd(void* u, int fd) {
 	close(fd);
 
 	for (i = 0; i < events.size; i++) {
-		if (u == events.data.ptr) {
-			events.data.ptr = NULL;
+		if (u == events.data[i].data.ptr) {
+			events.data[i].data.ptr = NULL;
 		}
 	}
 }
@@ -526,12 +565,12 @@ static void unregister_fd(void* u, int fd) {
 static void update_send_wait(void* u, int fd, bool enabled) {
 	struct epoll_event e;
 	if (enabled) {
-		e.events = POLL_READ;
-	} else {
 		e.events = POLL_READ | EPOLLOUT;
+	} else {
+		e.events = POLL_READ;
 	}
 	e.data.ptr = u;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, fd, e);
+	epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &e);
 }
 
 static void main_loop(spdy_connection* client, int* die) {
@@ -558,25 +597,25 @@ static void main_loop(spdy_connection* client, int* die) {
 			struct epoll_event* e = &events.data[i];
 			struct conn* c = (struct conn*) e->data.ptr;
 
-			if (e->udata == client) {
-				if (e->udata && (e->events & POLL_READ)) {
+			if (e->data.ptr == client) {
+				if (e->data.ptr && (e->events & POLL_READ)) {
 					if (spdyC_recv_ready(client)) {
 						return;
 					}
 				}
 
-				if (e->udata && (e->events & EPOLLOUT)) {
+				if (e->data.ptr && (e->events & EPOLLOUT)) {
 					if (spdyC_send_ready(client)) {
 						return;
 					}
 				}
 			} else {
 
-				if (c && (e->events & POLL_READ)) {
+				if (e->data.ptr && (e->events & POLL_READ)) {
 					fd_read(c);
 				}
 
-				if (c && (e->events & EPOLLOUT)) {
+				if (e->data.ptr && (e->events & EPOLLOUT)) {
 					fd_write(c);
 				}
 			}
@@ -626,7 +665,7 @@ int main(int argc, char* argv[]) {
 	SSL_CTX *ctx;
 
 #if defined __linux__
-	epfd = epoll_create();
+	epfd = epoll_create1(EPOLL_CLOEXEC);
 
 #elif defined _WIN32
 	WSADATA wsadata;

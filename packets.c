@@ -3,6 +3,8 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+#else
+#include <arpa/inet.h>
 #endif
 
 #include "packets.h"
@@ -77,14 +79,14 @@ void spdyH_set(spdy_headers* h, const char* key, spdy_string val) {
 }
 
 
-static void w32(char* p, uint32_t v) {
+static void w32(uint8_t* p, uint32_t v) {
 	p[0] = (uint8_t) (v >> 24);
 	p[1] = (uint8_t) (v >> 16);
 	p[2] = (uint8_t) (v >> 8);
 	p[3] = (uint8_t) (v);
 }
 
-static uint32_t r32(char* p) {
+static uint32_t r32(uint8_t* p) {
 	return ((uint32_t) p[0] << 24) |
 		((uint32_t) p[1] << 16) |
 		((uint32_t) p[2] << 8) |
@@ -92,8 +94,8 @@ static uint32_t r32(char* p) {
 }
 
 #define control_common \
-	char type[4]; \
-	char flags[4]
+	uint8_t type[4]; \
+	uint8_t flags[4]
 
 struct control_hdr {
 	control_common;
@@ -107,8 +109,8 @@ void parse_frame(uint32_t* type, int* length, const char* data) {
 }
 
 struct data_hdr {
-	char stream[4];
-	char flags[4];
+	uint8_t stream[4];
+	uint8_t flags[4];
 };
 
 void marshal_data_header(char* out, struct data* s) {
@@ -173,6 +175,7 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 	int i, err, vals;
 
 	dh_clear(&hdrs->h);
+	dv_clear(buf);
 
 	err = dz_inflate_dict(buf, z, d, dv_char(DICTIONARY));
 	if (err) return err;
@@ -181,7 +184,7 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 	if (d.size < 4) {
 		return SPDY_PROTOCOL;
 	}
-	vals = (int) r32(d.data);
+	vals = (int) r32((uint8_t*) d.data);
 	if (vals < 0) {
 		return SPDY_PROTOCOL;
 	}
@@ -195,7 +198,7 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 			return SPDY_PROTOCOL;
 		}
 
-		klen = (int) r32(d.data);
+		klen = (int) r32((uint8_t*) d.data);
 		d = dv_right(d, 4);
 
 		if (d.size < klen + 4 || klen < 0) {
@@ -205,7 +208,7 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 		key = dv_left(d, klen);
 		d = dv_right(d, klen);
 
-		vlen = (int) r32(d.data);
+		vlen = (int) r32((uint8_t*) d.data);
 		d = dv_right(d, 4);
 
 		if (d.size < vlen || vlen < 0) {
@@ -265,8 +268,8 @@ static int inflate_v3(spdy_headers* hdrs, struct extra_headers* e, z_stream* z, 
 
 struct syn_stream_hdr {
 	control_common;
-	char stream[4];
-	char associated_stream[4];
+	uint8_t stream[4];
+	uint8_t associated_stream[4];
 	uint8_t priority;
 	uint8_t unused;
 };
@@ -346,7 +349,7 @@ int parse_syn_stream(struct syn_stream* s, d_Slice(char) d, z_stream* z, d_Vecto
 
 struct syn_reply_hdr {
 	control_common;
-	char stream[4];
+	uint8_t stream[4];
 };
 
 void marshal_syn_reply(d_Vector(char)* out, struct syn_reply* s, z_stream* z) {
@@ -396,8 +399,8 @@ int parse_syn_reply(struct syn_reply* s, d_Slice(char) d, z_stream* z, d_Vector(
 
 struct rst_stream_hdr {
 	control_common;
-	char stream[4];
-	char error[4];
+	uint8_t stream[4];
+	uint8_t error[4];
 };
 
 void marshal_rst_stream(d_Vector(char)* out, int stream, int error) {
@@ -433,7 +436,7 @@ struct settings_hdr {
 
 struct ping_hdr {
 	control_common;
-	char id[4];
+	uint8_t id[4];
 };
 
 void marshal_ping(d_Vector(char)* out, uint32_t id) {
@@ -454,8 +457,8 @@ int parse_ping(uint32_t* id, d_Slice(char) d) {
 
 struct goaway_hdr {
 	control_common;
-	char last_stream[4];
-	char error[4];
+	uint8_t last_stream[4];
+	uint8_t error[4];
 };
 
 struct headers_hdr {
@@ -464,8 +467,8 @@ struct headers_hdr {
 
 struct window_hdr {
 	control_common;
-	char stream[4];
-	char window_delta[4];
+	uint8_t stream[4];
+	uint8_t window_delta[4];
 };
 
 void marshal_window(d_Vector(char)* out, int stream, int delta) {
