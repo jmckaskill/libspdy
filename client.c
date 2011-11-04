@@ -686,7 +686,7 @@ int main(int argc, char* argv[]) {
 	OpenSSL_add_ssl_algorithms();
 	ctx = SSL_CTX_new(TLSv1_client_method());
 
-	/*SSL_CTX_set_msg_callback(ctx, &SSL_MsgCallback);*/
+	SSL_CTX_set_msg_callback(ctx, &SSL_MsgCallback);
 
 	for (;;) {
 		spdy_connection* client = spdyC_connect(argv[1], ctx, &clientfd);

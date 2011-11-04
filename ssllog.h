@@ -257,21 +257,11 @@ static void SSL_MsgCallback(int write_p, int version, int content_type, const vo
 		}
 	}
 
-	{
-		d_Vector(char) out = DV_INIT;
-		dv_clear(&out);
-		dv_print(&out, "%s %s %s%s%s\n",
-				str_version,
-				write_p ? "TX" : "RX",
-				str_content_type,
-				str_details1,
-				str_details2);
-
-		dv_append_hex_dump(&out, dv_char2((char*) buf, len), false);
-		dv_append1(&out, '\n');
-
-		/*fprintf(stderr, "%.*s", DV_PRI(out));*/
-		dv_free(out);
-	}
+	dv_log(C2(buf, len), "%s %s %s%s%s\n",
+			str_version,
+			write_p ? "TX" : "RX",
+			str_content_type,
+			str_details1,
+			str_details2);
 }
 
