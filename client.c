@@ -29,6 +29,8 @@
 #define closesocket(s) close(s)
 #endif
 
+#include "ssllog.h"
+
 static void basic_auth(d_Vector(char)* v, d_Slice(char) user, d_Slice(char) pass) {
 	d_Vector(char) tmp = DV_INIT;
 	dv_append(&tmp, user);
@@ -680,6 +682,8 @@ int main(int argc, char* argv[]) {
 	SSL_load_error_strings();
 	OpenSSL_add_ssl_algorithms();
 	ctx = SSL_CTX_new(TLSv1_client_method());
+
+	/*SSL_CTX_set_msg_callback(ctx, &SSL_MsgCallback);*/
 
 	for (;;) {
 		spdy_connection* client = spdyC_connect(argv[1], ctx, &clientfd);
