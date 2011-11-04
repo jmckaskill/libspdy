@@ -132,7 +132,7 @@ static void log_headers(spdy_connection* c, spdy_headers* h) {
 	d_Slice(char) val;
 	int i = -1;
 	while (h && spdyH_next(h, &i, &key, &val)) {
-		Log(c, "\t%s: %.*s\n", key, DV_PRI(val));
+		Log(c, "\t%-16s\t%.*s\n", key, DV_PRI(val));
 	}
 }
 

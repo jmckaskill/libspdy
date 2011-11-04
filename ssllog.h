@@ -257,7 +257,7 @@ static void SSL_MsgCallback(int write_p, int version, int content_type, const vo
 		}
 	}
 
-	dv_log(C2(buf, len), "%s %s %s%s%s\n",
+	dv_log(C2(buf, len), "%s %s %s%s%s",
 			str_version,
 			write_p ? "TX" : "RX",
 			str_content_type,

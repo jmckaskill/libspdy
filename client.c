@@ -677,6 +677,10 @@ int main(int argc, char* argv[]) {
 	WSAStartup(MAKEWORD(2,2), &wsadata);
 #endif
 
+#ifndef _WIN32
+	dv_set_log_color(isatty(2));
+#endif
+
 	if (argc < 5) {
 		fprintf(stderr, "usage: client server hostname username password\n");
 		return -2;
