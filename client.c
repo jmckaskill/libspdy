@@ -3,6 +3,7 @@
 
 #ifdef _WIN32
 #include <WinSock2.h>
+#include <WS2tcpip.h>
 #else
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -25,7 +26,10 @@
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#define SHUT_WR SD_SEND
+#define sleep(t) Sleep((t)*1000)
+#else
 #define closesocket(s) close(s)
 #endif
 
@@ -101,10 +105,18 @@ static int connect_tcp(d_Slice(char) url) {
 			continue;
 		}
 
+#ifndef _WIN32
 		fcntl(sfd, F_SETFL, O_NONBLOCK);
 		fcntl(sfd, F_SETFD, FD_CLOEXEC);
+#endif
 
-		if (connect(sfd, rp->ai_addr, (int) rp->ai_addrlen) && errno != EINPROGRESS) {
+		if (connect(sfd, rp->ai_addr, (int) rp->ai_addrlen) && 
+#ifdef _WIN32
+			WSAGetLastError() == WSAEINPROGRESS
+#else
+			errno != EINPROGRESS
+#endif
+			) {
 			closesocket(sfd);
 			continue;
 		}
@@ -225,6 +237,9 @@ next_header:
 	return 0;
 }
 
+static void fd_read(void* u);
+static void stream_read(void* u, int sts, d_Slice(char) data, int compressed);
+
 static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 	struct conn* c;
 	int fd;
@@ -245,6 +260,8 @@ static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 	c->send_wait = true;
 	spdyS_ref(s);
 	register_fd(c, fd);
+	spdyS_on_recv(s, &stream_read, c);
+	spdyS_on_send_ready(s, &fd_read, c);
 
 	if (is_connect) {
 		c->sent_reply = true;
@@ -275,17 +292,18 @@ static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 	}
 }
 
-static void fd_read(struct conn* c) {
+static void fd_read(void* u) {
 	/* Note we don't grow the buffer larger than this to rate limit the
 	 * file descriptor
 	 */
+	struct conn* c = (struct conn*) u;
 
 	do {
 		int r, w;
 		dv_reserve(&c->rx, 64 * 1024);
 
 		do {
-			r = read(c->fd, c->rx.data + c->rx.size, dv_reserved(c->rx) - c->rx.size);
+			r = recv(c->fd, c->rx.data + c->rx.size, dv_reserved(c->rx) - c->rx.size, 0);
 		} while (r < 0 && errno == EINTR);
 
 		if (r < 0 && errno == EAGAIN) {
@@ -327,16 +345,13 @@ err:
 	close_conn(c);
 }
 
-static void stream_write(void* u) {
-	fd_read((struct conn*) u);
-}
-
-static void fd_write(struct conn* c) {
+static void fd_write(void* u) {
+	struct conn* c = (struct conn*) u;
 	if (c->tx.size) {
 		int w;
 
 		do {
-			w = write(c->fd, c->tx.data, c->tx.size);
+			w = send(c->fd, c->tx.data, c->tx.size, 0);
 		} while (w < 0 && errno == EINTR);
 
 		if (w <= 0 && errno == EAGAIN) {
@@ -352,7 +367,7 @@ static void fd_write(struct conn* c) {
 		}
 
 		if (c->s_finished && !c->tx.size) {
-			shutdown(c->fd, SHUT_RD);
+			shutdown(c->fd, SHUT_WR);
 		}
 	}
 
@@ -387,7 +402,7 @@ static void stream_read(void* u, int sts, d_Slice(char) data, int compressed) {
 		int w;
 
 		do {
-			w = write(c->fd, c->tx.data, c->tx.size);
+			w = send(c->fd, c->tx.data, c->tx.size, 0);
 		} while (w < 0 && errno == EINTR);
 
 		if (w <= 0 && errno == EAGAIN) {
@@ -407,7 +422,7 @@ static void stream_read(void* u, int sts, d_Slice(char) data, int compressed) {
 		int w;
 
 		do {
-			w = write(c->fd, data.data, data.size);
+			w = send(c->fd, data.data, data.size, 0);
 		} while (w < 0 && errno == EINTR);
 
 		if (w <= 0 && errno == EAGAIN) {
@@ -512,7 +527,6 @@ static void main_loop(spdy_connection* client, int* die) {
 
 		for (i = 0; i < events.size; i++) {
 			struct kevent* e = &events.data[i];
-			struct conn* c = (struct conn*) e->udata;
 
 			if (e->udata == client) {
 
@@ -530,9 +544,9 @@ static void main_loop(spdy_connection* client, int* die) {
 			} else if (c != NULL) {
 
 				if (e->filter == EVFILT_READ) {
-					fd_read(c);
+					fd_read(e->data.ptr);
 				} else if (e->filter == EVFILT_WRITE) {
-					fd_write(c);
+					fd_write(e->data.ptr);
 				}
 
 			}
@@ -597,7 +611,6 @@ static void main_loop(spdy_connection* client, int* die) {
 
 		for (i = 0; i < events.size; i++) {
 			struct epoll_event* e = &events.data[i];
-			struct conn* c = (struct conn*) e->data.ptr;
 
 			if (e->data.ptr == client) {
 				if (e->data.ptr && (e->events & POLL_READ)) {
@@ -614,12 +627,100 @@ static void main_loop(spdy_connection* client, int* die) {
 			} else {
 
 				if (e->data.ptr && (e->events & POLL_READ)) {
-					fd_read(c);
+					fd_read(e->data.ptr);
 				}
 
 				if (e->data.ptr && (e->events & EPOLLOUT)) {
-					fd_write(c);
+					fd_write(e->data.ptr);
 				}
+			}
+		}
+	}
+}
+
+#elif defined _WIN32
+#define POLL_READ (FD_READ | FD_CLOSE | FD_ACCEPT)
+#define POLL_WRITE (FD_WRITE | FD_CONNECT)
+struct reg {
+	void* ptr;
+	SOCKET fd;
+};
+DVECTOR_INIT(event, HANDLE);
+DVECTOR_INIT(reg, struct reg);
+static d_Vector(event) events;
+static d_Vector(reg) regs;
+static void* current_data;
+
+static void register_fd(void* u, int fd) {
+	struct reg* r;
+	HANDLE e = WSACreateEvent();
+	WSAEventSelect(fd, e, POLL_READ | POLL_WRITE);
+	dv_append1(&events, e);
+	r = dv_append_buffer(&regs, 1);
+	r->ptr = u;
+	r->fd = (SOCKET) fd;
+}
+
+static void unregister_fd(void* u, int fd) {
+	int i;
+	if (u == current_data) {
+		current_data = NULL;
+	}
+
+	for (i = 0; i < regs.size; i++) {
+		if (regs.data[i].ptr == u) {
+			CloseHandle(events.data[i]);
+			closesocket(regs.data[i].fd);
+			break;
+		}
+	}
+
+}
+
+static void update_send_wait(void* u, int fd, bool enabled) {
+	int i;
+	for (i = 0; i < regs.size; i++) {
+		if (regs.data[i].ptr == u) {
+			WSAEventSelect(fd, events.data[i], POLL_READ | (enabled ? POLL_WRITE : 0));
+			break;
+		}
+	}
+}
+
+static void main_loop(spdy_connection* client, int* die) {
+	while (!*die) {
+		struct reg* r;
+		WSANETWORKEVENTS ev;
+		int i = (int) WaitForMultipleObjects(events.size, events.data, FALSE, POLL_TIMEOUT * 1000);
+
+		if (i == 0) {
+			on_timeout();
+			continue;
+		} else if (i < 0 || i > events.size) {
+			return;
+		}
+
+		r = &regs.data[i];
+
+		if (WSAEnumNetworkEvents(r->fd, events.data[i], &ev)) {
+			continue;
+		}
+
+		current_data = r->ptr;
+
+		if (current_data == client) {
+			if (ev.lNetworkEvents & POLL_READ) {
+				spdyC_recv_ready(client);
+			}
+			if (current_data && (ev.lNetworkEvents & POLL_WRITE)) {
+				spdyC_send_ready(client);
+			}
+		} else {
+			if (ev.lNetworkEvents & POLL_READ) {
+				fd_read(current_data);
+			}
+			if (current_data && (ev.lNetworkEvents & POLL_WRITE)) {
+				fd_write(current_data);
 			}
 		}
 	}
