@@ -666,8 +666,11 @@ static void on_timeout(void) {
 int main(int argc, char* argv[]) {
 	SSL_CTX *ctx;
 
-#if defined __linux__
+#if defined __linux__ && defined EPOLL_CLOEXEC
 	epfd = epoll_create1(EPOLL_CLOEXEC);
+#elif defined __linux__
+	epfd = epoll_create(0);
+	fcntl(epfd, F_SETFD, FD_CLOEXEC);
 
 #elif defined _WIN32
 	WSADATA wsadata;

@@ -19,9 +19,13 @@
 #ifdef _MSC_VER
 #define ref(p) _InterlockedIncrement(p)
 #define deref(p) _InterlockedDecrement(p)
+#elif __GNUC__ + 0 == 4 && __GNUC_MINOR__ < 3 && defined __arm__
+/* Bug in GCC for arm on 4.3 and earlier - doesn't provide the intrinsics */
+#define ref(p) (++*(p))
+#define deref(p) (--*(p))
 #else
 #define ref(p) __sync_add_and_fetch(p, 1)
-#define deref(p) __sync_add_and_fetch(p, 1)
+#define deref(p) __sync_add_and_fetch(p, -1)
 #endif
 
 #define DEFAULT_PROTOCOL C("HTTP/1.1")
