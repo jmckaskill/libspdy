@@ -110,7 +110,7 @@ static int connect_tcp(d_Slice(char) url) {
 		fcntl(sfd, F_SETFD, FD_CLOEXEC);
 #endif
 
-		if (connect(sfd, rp->ai_addr, (int) rp->ai_addrlen) && 
+		if (connect(sfd, rp->ai_addr, (int) rp->ai_addrlen) &&
 #ifdef _WIN32
 			WSAGetLastError() == WSAEINPROGRESS
 #else
@@ -541,12 +541,12 @@ static void main_loop(spdy_connection* client, int* die) {
 					}
 				}
 
-			} else if (c != NULL) {
+			} else if (e->udata) {
 
 				if (e->filter == EVFILT_READ) {
-					fd_read(e->data.ptr);
+					fd_read(e->udata);
 				} else if (e->filter == EVFILT_WRITE) {
-					fd_write(e->data.ptr);
+					fd_write(e->udata);
 				}
 
 			}
