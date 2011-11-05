@@ -21,6 +21,7 @@
 #endif
 
 #include <errno.h>
+#include <assert.h>
 
 #include <spdy.h>
 #include <openssl/ssl.h>
@@ -42,7 +43,7 @@ static void basic_auth(d_Vector(char)* v, d_Slice(char) user, d_Slice(char) pass
 	dv_append(&tmp, pass);
 
 	dv_set(v, C("Basic "));
-	dv_append_base64_encoded(v, tmp);
+	dv_base64_encode(v, tmp);
 
 	dv_free(tmp);
 }
@@ -190,13 +191,14 @@ static int send_reply(struct conn* c) {
 	d = dv_left(d, idx);
 	h = spdyH_new();
 
-	rep.protocol = dv_split_left(&d, ' ');
-	rep.status = dv_to_integer(dv_split_left(&d, ' '), 10, HTTP_BAD_GATEWAY);
+	rep.protocol = dv_split(&d, ' ');
+	rep.status = dv_to_integer(dv_split(&d, ' '), 10, HTTP_BAD_GATEWAY);
 	rep.status_string = dv_split_line(&d);
 	rep.headers = h;
 
 	for (;;) {
 		d_Slice(char) line, key, val;
+		char* kp;
 		int i;
 
 next_header:
@@ -205,14 +207,19 @@ next_header:
 			break;
 		}
 
-		key = dv_strip_whitespace(dv_split_left(&line, ':'));
+		key = dv_strip_whitespace(dv_split(&line, ':'));
 		val = dv_strip_whitespace(line);
 
-		key.data[key.size] = '\0';
+		/* lowercase the key - strictly speaking we shouldn't do this
+		 * as key is const char, but we know its in a buffer somewhere
+		 */
+
+		kp = (char*) key.data;
+		kp[key.size] = '\0';
 		for (i = 0; i < key.size; i++) {
-			if ('A' <= key.data[i] && key.data[i] <= 'Z') {
-				key.data[i] += 'a' - 'A';
-			} else if (key.data[i] == ':' || key.data[i] <= ' ' || key.data[i] >= 0x7F) {
+			if ('A' <= kp[i] && kp[i] <= 'Z') {
+				kp[i] += 'a' - 'A';
+			} else if (kp[i] == ':' || kp[i] <= ' ' || kp[i] >= 0x7F) {
 				goto next_header;
 			}
 		}
@@ -282,7 +289,7 @@ static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 
 		while (spdyH_next(req->headers, &idx, &key, &vals)) {
 			while (vals.size) {
-				val = dv_split_left(&vals, '\0');
+				val = dv_split(&vals, '\0');
 				dv_print(&c->tx, "%s: %.*s\r\n", key, DV_PRI(val));
 			}
 		}
@@ -456,7 +463,7 @@ err:
 }
 
 static void on_timeout(void);
-#define POLL_TIMEOUT 400
+#define POLL_TIMEOUT 20
 
 #ifdef __MACH__
 DVECTOR_INIT(kevent, struct kevent);
@@ -778,10 +785,6 @@ int main(int argc, char* argv[]) {
 	WSAStartup(MAKEWORD(2,2), &wsadata);
 #endif
 
-#ifndef _WIN32
-	dv_set_log_color(isatty(2));
-#endif
-
 	if (argc < 5) {
 		fprintf(stderr, "usage: client server hostname username password\n");
 		return -2;
@@ -791,7 +794,7 @@ int main(int argc, char* argv[]) {
 	OpenSSL_add_ssl_algorithms();
 	ctx = SSL_CTX_new(TLSv1_client_method());
 
-	SSL_CTX_set_msg_callback(ctx, &SSL_MsgCallback);
+	/*SSL_CTX_set_msg_callback(ctx, &SSL_MsgCallback);*/
 
 	for (;;) {
 		spdy_connection* client = spdyC_connect(argv[1], ctx, &clientfd);
@@ -811,7 +814,7 @@ int main(int argc, char* argv[]) {
 			spdyH_set(h, "authorization", auth);
 
 			dv_set(&path, C("/bind?hostname="));
-			dv_append_url_encoded(&path, dv_char(argv[2]));
+			dv_url_encode(&path, dv_char(argv[2]));
 
 			memset(&r, 0, sizeof(r));
 			r.host = dv_char(argv[1]);

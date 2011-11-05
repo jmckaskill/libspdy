@@ -1,5 +1,6 @@
 /* vim: set noet sts=8 ts=8 sw=8 tw=78: */
-
+#define SPDY_USE_DMEM
+#define __STDC_CONSTANT_MACROS
 
 #ifdef _WIN32
 #include <WinSock2.h>
@@ -7,7 +8,6 @@
 #include <sys/socket.h>
 #endif
 
-#define SPDY_USE_DMEM
 #include <spdy.h>
 #include "packets.h"
 #include <dmem/hash.h>
@@ -791,7 +791,7 @@ static int handle_syn_reply(spdy_connection* c, d_Slice(char) d) {
 	r.headers = f.headers;
 
 	{
-		d_Slice(char) code = dv_split_left(&r.status_string, ' ');
+		d_Slice(char) code = dv_split(&r.status_string, ' ');
 		r.status = dv_to_integer(code, 10, -1);
 
 		if (code.size == 0 || r.status < 0) {
@@ -1407,7 +1407,7 @@ static int proxy_read(BIO *b, char* buf, int size) {
 
 	/* Consume data until we get two newlines in a row */
 	for (;;) {
-		p = memchr(p, '\n', e - p);
+		p = (char*) memchr(p, '\n', e - p);
 		if (p == NULL) {
 			BIO_set_retry_read(b);
 			return 0;

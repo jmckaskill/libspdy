@@ -1,5 +1,6 @@
 /* vim: set noet sts=8 ts=8 sw=8 tw=78: */
 #define SPDY_USE_DMEM
+#define __STDC_CONSTANT_MACROS
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -313,7 +314,7 @@ int parse_syn_stream(struct syn_stream* s, d_Slice(char) d, z_stream* z, d_Vecto
 	uint32_t flags;
 	int err;
 
-	if (d.size < sizeof(struct syn_stream_hdr)) {
+	if (d.size < (int) sizeof(struct syn_stream_hdr)) {
 		return SPDY_PROTOCOL;
 	}
 
@@ -375,7 +376,7 @@ int parse_syn_reply(struct syn_reply* s, d_Slice(char) d, z_stream* z, d_Vector(
 	struct extra_headers e;
 	int err;
 
-	if (d.size < sizeof(struct syn_reply_hdr)) {
+	if (d.size < (int) sizeof(struct syn_reply_hdr)) {
 		return SPDY_PROTOCOL;
 	}
 
@@ -415,7 +416,7 @@ void marshal_rst_stream(d_Vector(char)* out, int stream, int error) {
 int parse_rst_stream(int* stream, int* error, d_Slice(char) d) {
 	struct rst_stream_hdr* h = (struct rst_stream_hdr*) d.data;
 
-	if (d.size < sizeof(struct rst_stream_hdr)) {
+	if (d.size < (int) sizeof(struct rst_stream_hdr)) {
 		return SPDY_PROTOCOL;
 	}
 
@@ -448,7 +449,7 @@ void marshal_ping(d_Vector(char)* out, uint32_t id) {
 }
 
 int parse_ping(uint32_t* id, d_Slice(char) d) {
-	if (d.size < sizeof(struct ping_hdr)) {
+	if (d.size < (int) sizeof(struct ping_hdr)) {
 		return SPDY_PROTOCOL;
 	}
 	*id = r32(((struct ping_hdr*) d.data)->id);
@@ -483,7 +484,7 @@ void marshal_window(d_Vector(char)* out, int stream, int delta) {
 int parse_window(int* stream, int* delta, d_Slice(char) d) {
 	struct window_hdr* h = (struct window_hdr*) d.data;
 
-	if (d.size < sizeof(struct window_hdr)) {
+	if (d.size < (int) sizeof(struct window_hdr)) {
 		return SPDY_PROTOCOL;
 	}
 
