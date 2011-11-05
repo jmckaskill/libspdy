@@ -231,6 +231,8 @@ spdy_connection* spdyC_new(BIO* io, int io_close) {
 
 	c->headers = spdyH_new();
 
+	c->waiting_for_write = 1;
+
 	return c;
 }
 
