@@ -281,9 +281,11 @@ static int on_request(void* u, spdy_stream* s, spdy_request* req) {
 		spdyH_set(req->headers, "connection", C("close"));
 
 		/* Format up the HTTP request */
-		dv_print(&c->tx, "%.*s %.*s %.*s\r\nHost: %.*s\r\n",
+		dv_print(&c->tx, "%.*s %.*s%s%.*s %.*s\r\nHost: %.*s\r\n",
 				DV_PRI(req->method),
 				DV_PRI(req->path),
+				req->query.size ? "?" : "",
+				DV_PRI(req->query),
 				DV_PRI(req->protocol),
 				DV_PRI(req->host));
 

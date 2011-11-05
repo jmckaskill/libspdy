@@ -55,6 +55,7 @@ struct syn_stream {
 	d_Slice(char) scheme;
 	d_Slice(char) host;
 	d_Slice(char) path;
+	d_Slice(char) query;
 	d_Slice(char) protocol;
 	d_Slice(char) method;
 };

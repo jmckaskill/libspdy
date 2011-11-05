@@ -83,6 +83,7 @@ struct spdy_connection {
 	d_Vector(char) rbuf;
 
 	d_Vector(char) hdrbuf;
+	d_Vector(char) pathbuf;
 	spdy_headers* headers;
 
 	d_Vector(char) sbuf;
@@ -336,6 +337,7 @@ void spdyC_free(spdy_connection* c) {
 
 	spdyH_free(c->headers);
 	dv_free(c->hdrbuf);
+	dv_free(c->pathbuf);
 	dv_free(c->tbuf);
 	dv_free(c->sbuf);
 	dv_free(c->rbuf);
@@ -579,10 +581,14 @@ static int handle_syn_stream(spdy_connection* c, d_Slice(char) d) {
 	r.method = f.method;
 	r.scheme = f.scheme;
 	r.host = f.host;
-	r.path = f.path;
 	r.protocol = f.protocol;
 	r.headers = f.headers;
 	r.priority = f.priority - DEFAULT_PRIORITY;
+	r.query = f.query;
+
+	dv_clear(&c->pathbuf);
+	dv_clean_path(&c->pathbuf, f.path);
+	r.path = c->pathbuf;
 
 	/* Messages that have both their rx and tx pipes already closed don't
 	 * need to be added to the streams table.

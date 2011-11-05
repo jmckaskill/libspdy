@@ -133,9 +133,9 @@ void parse_data(struct data* s, d_Slice(char) d) {
 	s->size = (int) (flags & FLAG_LENGTH);
 }
 
-static void deflate_v3(d_Vector(char)* out, z_stream* z, d_Slice(char) key, d_Slice(char) val) {
+static void deflate_v3(d_Vector(char)* out, z_stream* z, d_Slice(char) key, int valsz, d_Slice(char) val) {
 	uint32_t klen = (uint32_t) htonl(key.size);
-	uint32_t vlen = (uint32_t) htonl(val.size);
+	uint32_t vlen = (uint32_t) htonl(valsz);
 #ifndef NDEBUG
 	{
 		int i;
@@ -158,7 +158,8 @@ static void begin_deflate_v3(d_Vector(char)* out, z_stream* z, spdy_headers* hdr
 	if (hdrs) {
 		int idx = -1;
 		while (dh_hasnext(&hdrs->h, &idx)) {
-			deflate_v3(out, z, hdrs->h.keys[idx], hdrs->h.vals[idx]);
+			d_Slice(char) val = hdrs->h.vals[idx];
+			deflate_v3(out, z, hdrs->h.keys[idx], val.size, val);
 		}
 	}
 }
@@ -287,12 +288,18 @@ void marshal_syn_stream(d_Vector(char)* out, struct syn_stream* s, z_stream* z) 
 	}
 
 	begin_deflate_v3(out, z, s->headers, 5);
-	deflate_v3(out, z, C(":version"), s->protocol);
-	deflate_v3(out, z, C(":method"), s->method);
-	deflate_v3(out, z, C(":path"), s->path);
-	deflate_v3(out, z, C(":host"), s->host);
-	deflate_v3(out, z, C(":scheme"), s->scheme);
-	dz_deflate(out, z, C(""), Z_SYNC_FLUSH);
+	deflate_v3(out, z, C(":version"), s->protocol.size, s->protocol);
+	deflate_v3(out, z, C(":method"), s->method.size, s->method);
+	deflate_v3(out, z, C(":host"), s->host.size, s->host);
+	deflate_v3(out, z, C(":scheme"), s->scheme.size, s->scheme);
+	if (s->query.size) {
+		deflate_v3(out, z, C(":path"), s->path.size + s->query.size + 1, s->path);
+		dz_deflate(out, z, C("?"), Z_NO_FLUSH);
+		dz_deflate(out, z, s->query, Z_SYNC_FLUSH);
+	} else {
+		deflate_v3(out, z, C(":path"), s->path.size, s->path);
+		dz_deflate(out, z, C(""), Z_SYNC_FLUSH);
+	}
 
 	h = (struct syn_stream_hdr*) &out->data[begin];
 
@@ -343,7 +350,8 @@ int parse_syn_stream(struct syn_stream* s, d_Slice(char) d, z_stream* z, d_Vecto
 	s->method = e.method;
 	s->scheme = e.scheme;
 	s->host = e.host;
-	s->path = e.path;
+	s->path = dv_split(&e.path, '?');
+	s->query = e.path;
 
 	return 0;
 }
@@ -360,8 +368,8 @@ void marshal_syn_reply(d_Vector(char)* out, struct syn_reply* s, z_stream* z) {
 	dv_append_buffer(out, sizeof(struct syn_reply_hdr));
 
 	begin_deflate_v3(out, z, s->headers, 2);
-	deflate_v3(out, z, C(":status"), s->status);
-	deflate_v3(out, z, C(":version"), s->protocol);
+	deflate_v3(out, z, C(":status"), s->status.size, s->status);
+	deflate_v3(out, z, C(":version"), s->protocol.size, s->protocol);
 	dz_deflate(out, z, C(""), Z_SYNC_FLUSH);
 
 	h = (struct syn_reply_hdr*) &out->data[begin];

@@ -92,7 +92,8 @@ struct spdy_request {
 	spdy_string method;        /* eg GET */
 	spdy_string scheme;        /* eg https */
 	spdy_string host;          /* eg example.com */
-	spdy_string path;          /* eg /foo/bar?val=3 - always has leading / */
+	spdy_string path;          /* eg /foo/bar - always has leading /, incoming paths are cleaned */
+	spdy_string query;	   /* eg val=3&foo=bar */
 	spdy_string protocol;      /* eg HTTP/1.1 */
 	spdy_headers* headers;
 	int priority;              /* 0 is default priority, -ve is higher like nice values */
